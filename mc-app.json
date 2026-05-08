@@ -1,0 +1,58 @@
+{
+  "name": "cvb-meteo-portal",
+  "runtimeType": "shared",
+  "regionSettings": {
+    "allowedRegionIds": ["FR"],
+    "requiredRegionIds": ["FR"],
+    "maxAllowedRegions": 1,
+    "provisioningType": "static"
+  },
+  "autoScaling": {
+    "min": 1,
+    "max": 1
+  },
+  "containerTemplates": [
+    {
+      "name": "web",
+      "image": "library/node:20-alpine",
+      "imageName": "node",
+      "imageNamespace": "library",
+      "imageTag": "20-alpine",
+      "imageRegistryId": "1155",
+      "imagePullPolicy": "always",
+      "entryPoint": {
+        "command": "/bin/sh",
+        "commandArray": ["/bin/sh"],
+        "arguments": "-c apk add --no-cache git && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && node server/runtime.mjs",
+        "argumentsArray": [
+          "-c",
+          "apk add --no-cache git && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && node server/runtime.mjs"
+        ],
+        "workingDirectory": "/"
+      },
+      "environmentVariables": [
+        { "name": "PORT", "value": "3001" },
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "LATITUDE", "value": "40.04375215857617" },
+        { "name": "LONGITUDE", "value": "0.0651749140667065" },
+        { "name": "WINDGURU_STATIONS_URL", "value": "https://stations.windguru.cz/data_api.php" }
+      ],
+      "endpoints": [
+        {
+          "displayName": "web-cdn",
+          "cdn": {
+            "sslForOrigin": false,
+            "portMappings": [
+              {
+                "containerPort": 3001,
+                "protocols": ["tcp"]
+              }
+            ]
+          }
+        }
+      ],
+      "volumeMounts": []
+    }
+  ],
+  "volumes": []
+}
