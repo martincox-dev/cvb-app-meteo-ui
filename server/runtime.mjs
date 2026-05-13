@@ -10,6 +10,11 @@ const LON = Number(process.env.LONGITUDE || "0.0651749140667065");
 const AEMET_API_KEY = process.env.AEMET_API_KEY || "";
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
+const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN || "";
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
+const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || "hello_world";
+const WHATSAPP_TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || "en_US";
+const WHATSAPP_TEST_TO = process.env.WHATSAPP_TEST_TO || "";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -37,6 +42,70 @@ async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.json();
+}
+
+async function parseBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  if (!chunks.length) return {};
+  const raw = Buffer.concat(chunks).toString("utf8");
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function sendWhatsAppTemplate({ to, templateName, langCode, components }) {
+  const endpoint = `https://graph.facebook.com/v25.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: langCode },
+    },
+  };
+  if (Array.isArray(components) && components.length) {
+    payload.template.components = components;
+  }
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || `WhatsApp HTTP ${response.status}`);
+  }
+  return data;
+}
+
+async function sendWhatsAppText({ to, text }) {
+  const endpoint = `https://graph.facebook.com/v25.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text },
+  };
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.error?.message || `WhatsApp HTTP ${response.status}`);
+  }
+  return data;
 }
 
 async function fetchAemetAlerts() {
@@ -130,6 +199,41 @@ const server = createServer(async (req, res) => {
     if (!req.url) return json(res, 400, { ok: false, error: "bad request" });
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === "/health") return json(res, 200, { ok: true });
+
+    if (url.pathname === "/api/whatsapp/test-alert") {
+      if (!WHATSAPP_API_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+        return json(res, 400, {
+          ok: false,
+          error: "missing_whatsapp_config",
+          required: ["WHATSAPP_API_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"],
+        });
+      }
+      const body = await parseBody(req);
+      const to = String(body.to || WHATSAPP_TEST_TO || "").replace(/\s+/g, "");
+      if (!to) {
+        return json(res, 400, { ok: false, error: "missing_destination", hint: "send {\"to\":\"346...\"}" });
+      }
+      const mode = String(body.mode || "template").toLowerCase();
+      let result;
+      if (mode === "text") {
+        const text = String(body.text || "Prueba alerta meteo CVB");
+        result = await sendWhatsAppText({ to, text });
+      } else {
+        result = await sendWhatsAppTemplate({
+          to,
+          templateName: String(body.template_name || WHATSAPP_TEMPLATE_NAME),
+          langCode: String(body.lang_code || WHATSAPP_TEMPLATE_LANG),
+          components: Array.isArray(body.components) ? body.components : [],
+        });
+      }
+      return json(res, 200, {
+        ok: true,
+        to,
+        mode,
+        message_id: result?.messages?.[0]?.id || null,
+        status: result?.messages?.[0]?.message_status || "accepted",
+      });
+    }
 
     if (url.pathname === "/api/meteo") {
       const [{ meteo, marine }, windy, windguru, aemetAlerts] = await Promise.all([fetchOpenMeteo(), fetchWindyPoint(), fetchWindguruNearest(), fetchAemetAlerts()]);
