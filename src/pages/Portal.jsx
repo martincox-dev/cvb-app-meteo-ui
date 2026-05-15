@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import Header from "../components/weather/Header";
 import CurrentConditions from "../components/weather/CurrentConditions";
 import HourlyChart from "../components/weather/HourlyChart";
-import ForecastStrip from "../components/weather/ForecastStrip";
 import AemetAlerts from "../components/weather/AemetAlerts";
 import AemetHistory from "../components/weather/AemetHistory";
 import WindyMap from "../components/weather/WindyMap";
@@ -68,9 +67,6 @@ export default function Portal() {
 
         {/* Hourly chart */}
         <HourlyChart hourly={station.hourly} />
-
-        {/* 7-day forecast */}
-        <ForecastStrip forecast={station.forecast} />
 
         {/* Windy map */}
         <WindyMap />

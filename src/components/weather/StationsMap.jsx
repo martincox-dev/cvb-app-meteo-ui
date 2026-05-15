@@ -37,7 +37,7 @@ export default function StationsMap({ stations = [] }) {
     <section>
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-space font-semibold text-foreground text-lg">Estaciones meteorológicas accesibles por API</h2>
-        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuente: AEMET API (inventario)</span>
+        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuentes: AVAMET + AEMET API</span>
       </div>
 
       <div className="bg-white rounded-2xl shadow-card overflow-hidden">
@@ -98,6 +98,20 @@ export default function StationsMap({ stations = [] }) {
             </Marker>
           ))}
         </MapContainer>
+
+        <div className="border-t border-border/50 p-4">
+          <p className="text-xs font-semibold text-muted-foreground mb-2">Estaciones cargadas ({stations.length})</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            {stations.map((st, idx) => (
+              <div key={`row-${st.id || idx}`} className="rounded-lg border border-border/60 px-3 py-2 bg-muted/20">
+                <p className="text-sm font-medium text-foreground truncate">{st.name}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {st.source || "API"} · {Number(st.lat).toFixed(4)}, {Number(st.lon).toFixed(4)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   );
