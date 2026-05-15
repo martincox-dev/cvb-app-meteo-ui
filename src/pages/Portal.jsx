@@ -9,7 +9,7 @@ import StationsMap from "../components/weather/StationsMap";
 import WebcamViewer from "../components/weather/WebcamViewer";
 import WindguruStationsSection from "../components/weather/WindguruStationsSection";
 
-const CVB_LOGO_URL = "https://media.base44.com/images/public/69fdcf37fbe3119a19af55e5/3447346e5_bandera_cvb_mono_print.svg";
+const CVB_LOGO_URL = "https://media.base44.com/images/public/69fdcf37fbe3119a19af55e5/5fc0277b6_marineria_delante.svg";
 
 export default function Portal() {
   const [station, setStation] = useState(null);

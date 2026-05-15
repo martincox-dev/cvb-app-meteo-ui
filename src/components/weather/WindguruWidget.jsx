@@ -5,7 +5,6 @@ const WINDGURU_STATIONS = {
 
 export default function WindguruWidget({ stationId, title }) {
   const baseUrl = WINDGURU_STATIONS[String(stationId)] || `https://www.windguru.cz/station/${stationId}`;
-  const widgetUrl = `${baseUrl}?m=3&t=c&lang=es`;
 
   return (
     <article className="bg-white rounded-xl border border-border/60 shadow-card overflow-hidden">
@@ -20,13 +19,19 @@ export default function WindguruWidget({ stationId, title }) {
           Abrir Windguru
         </a>
       </header>
-      <iframe
-        src={widgetUrl}
-        title={`Windguru ${stationId}`}
-        className="w-full"
-        style={{ height: "360px", border: "0" }}
-        loading="lazy"
-      />
+      <div className="px-4 py-5 bg-muted/20">
+        <p className="text-sm text-muted-foreground">
+          Windguru bloquea la carga embebida en <code>iframe</code> en dominios externos.
+        </p>
+        <a
+          href={baseUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex mt-3 text-sm text-primary hover:underline font-medium"
+        >
+          Abrir estación {stationId} en Windguru
+        </a>
+      </div>
     </article>
   );
 }
