@@ -22,9 +22,9 @@ export default function WindguruWidget({ title }) {
       "odh=0",
       "doh=24",
       "fhours=240",
-      "hrsm=2",
+      "hrsm=1",
       "vt=forecasts",
-      "lng=en",
+      "lng=es",
       "p=WINDSPD,GUST,SMER,HTSGW,PERPW,DIRPW,SWELL1,SWPER1,SWDIR1,TMP,CDC,APCP1s,RH",
     ];
 
