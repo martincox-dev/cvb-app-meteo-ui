@@ -8,6 +8,11 @@ const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
 const LON = Number(process.env.LONGITUDE || "0.0651749140667065");
 const AEMET_API_KEY = process.env.AEMET_API_KEY || "";
+const AEMET_TARGET_ZONE_CODES = (process.env.AEMET_TARGET_ZONE_CODES || "").split(",").map((s) => s.trim()).filter(Boolean);
+const AEMET_TARGET_KEYWORDS = (
+  process.env.AEMET_TARGET_KEYWORDS ||
+  "Litoral sur de Castellón,Interior sur de Castellón,Aguas costeras de Castellón,Castellón sur"
+).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
 const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN || "";
@@ -115,24 +120,45 @@ async function fetchAemetAlerts() {
     if (!idx?.datos) return [];
     const raw = await fetchJson(idx.datos);
     const list = Array.isArray(raw) ? raw : [raw];
-    return list.map((a, i) => {
+    const mapped = list.map((a, i) => {
       const sev = String(a?.nivel || a?.severity || "").toLowerCase();
       let level = "verde";
       if (sev.includes("amar")) level = "amarillo";
       if (sev.includes("naran")) level = "naranja";
       if (sev.includes("rojo")) level = "rojo";
+      const areaText = String(a?.ambito || a?.area || a?.geocode || "Litoral Castellón");
+      const areaCode = String(a?.idZona || a?.code || a?.geocode || a?.id || "");
+      const desc = String(
+        a?.descripcion ||
+        a?.description ||
+        a?.instruction ||
+        a?.headline ||
+        a?.event ||
+        "Aviso oficial de AEMET"
+      );
       return {
         id: String(a?.id || `aemet-${i}`),
+        areaCode,
         level,
         levelLabel: level === "amarillo" ? "Aviso Amarillo" : level === "naranja" ? "Aviso Naranja" : level === "rojo" ? "Aviso Rojo" : "Sin Aviso",
         phenomenon: a?.fenomeno || a?.phenomenon || "Aviso meteorológico",
-        area: a?.ambito || a?.area || "Litoral Castellón",
-        description: a?.descripcion || a?.description || "Aviso oficial de AEMET",
+        area: areaText,
+        description: desc,
         validFrom: a?.inicio || a?.effective || new Date().toISOString(),
         validTo: a?.fin || a?.expires || new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
+        raw: a,
         source: "AEMET",
       };
     });
+    const filtered = mapped.filter((alert) => {
+      const haystack = `${alert.area} ${alert.description}`.toLowerCase();
+      const byKeyword = AEMET_TARGET_KEYWORDS.some((k) => haystack.includes(k));
+      const byCode = AEMET_TARGET_ZONE_CODES.length
+        ? AEMET_TARGET_ZONE_CODES.some((c) => String(alert.areaCode).includes(c))
+        : false;
+      return byKeyword || byCode;
+    });
+    return filtered;
   } catch {
     return [];
   }
@@ -194,6 +220,13 @@ function contentType(path) {
   return "application/octet-stream";
 }
 
+function alertRank(level) {
+  if (level === "rojo") return 4;
+  if (level === "naranja") return 3;
+  if (level === "amarillo") return 2;
+  return 1;
+}
+
 const server = createServer(async (req, res) => {
   try {
     if (!req.url) return json(res, 400, { ok: false, error: "bad request" });
@@ -232,6 +265,52 @@ const server = createServer(async (req, res) => {
         mode,
         message_id: result?.messages?.[0]?.id || null,
         status: result?.messages?.[0]?.message_status || "accepted",
+      });
+    }
+
+    if (url.pathname === "/api/whatsapp/send-aemet-alert") {
+      if (!WHATSAPP_API_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+        return json(res, 400, {
+          ok: false,
+          error: "missing_whatsapp_config",
+          required: ["WHATSAPP_API_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"],
+        });
+      }
+      const [alerts] = await Promise.all([fetchAemetAlerts()]);
+      if (!alerts.length) {
+        return json(res, 404, {
+          ok: false,
+          error: "no_aemet_alerts_for_target_zones",
+          target_keywords: AEMET_TARGET_KEYWORDS,
+          target_codes: AEMET_TARGET_ZONE_CODES,
+        });
+      }
+      const best = [...alerts].sort((a, b) => alertRank(b.level) - alertRank(a.level))[0];
+      const bodyParams = [
+        { type: "text", text: String(best.area || "-").slice(0, 1024) },
+        { type: "text", text: String(best.levelLabel || best.level || "-").slice(0, 1024) },
+        { type: "text", text: String(best.phenomenon || "-").slice(0, 1024) },
+        { type: "text", text: String(best.description || "-").slice(0, 1024) },
+        { type: "text", text: String(best.validFrom || "-").slice(0, 1024) },
+        { type: "text", text: String(best.validTo || "-").slice(0, 1024) },
+      ];
+      const send = await sendWhatsAppTemplate({
+        to: WHATSAPP_TEST_TO || "34677025272",
+        templateName: WHATSAPP_TEMPLATE_NAME,
+        langCode: WHATSAPP_TEMPLATE_LANG,
+        components: [{ type: "body", parameters: bodyParams }],
+      });
+      return json(res, 200, {
+        ok: true,
+        sent_alert: {
+          area: best.area,
+          level: best.level,
+          phenomenon: best.phenomenon,
+          validFrom: best.validFrom,
+          validTo: best.validTo,
+        },
+        message_id: send?.messages?.[0]?.id || null,
+        status: send?.messages?.[0]?.message_status || "accepted",
       });
     }
 
