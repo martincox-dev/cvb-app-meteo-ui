@@ -2,17 +2,19 @@ import { useEffect, useMemo, useRef } from "react";
 
 export default function WindguruWidget({ title }) {
   const mountRef = useRef(null);
-  const uid = useMemo(() => `wg_fwdg_853188_52_${Date.now()}`, []);
-  const baseUrl = "https://www.windguru.cz";
+  const uid = useMemo(() => `wg_fwdg_503203_52_${Date.now()}`, []);
+  const baseUrl = "https://www.windguru.cz/853188";
 
   useEffect(() => {
     if (!mountRef.current) return;
     mountRef.current.innerHTML = "";
 
     const arg = [
-      "s=853188",
+      "s=503203",
       "m=52",
+      "mw=46",
       `uid=${uid}`,
+      "ai=0",
       "wj=knots",
       "tj=c",
       "waj=m",
@@ -23,7 +25,7 @@ export default function WindguruWidget({ title }) {
       "hrsm=2",
       "vt=forecasts",
       "lng=en",
-      "p=WINDSPD,GUST,SMER,TMP,WCHILL,CDC,APCP1s,RH",
+      "p=WINDSPD,GUST,SMER,HTSGW,PERPW,DIRPW,SWELL1,SWPER1,SWDIR1,TMP,CDC,APCP1s,RH",
     ];
 
     const script = document.createElement("script");

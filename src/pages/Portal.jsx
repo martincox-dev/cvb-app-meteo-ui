@@ -8,8 +8,9 @@ import WindyMap from "../components/weather/WindyMap";
 import StationsMap from "../components/weather/StationsMap";
 import WebcamViewer from "../components/weather/WebcamViewer";
 import WindguruStationsSection from "../components/weather/WindguruStationsSection";
+import cvbLogo from "../assets/logo-cvb-v2.svg";
 
-const CVB_LOGO_URL = "https://media.base44.com/images/public/69fdcf37fbe3119a19af55e5/5fc0277b6_marineria_delante.svg";
+const CVB_LOGO_URL = cvbLogo;
 
 export default function Portal() {
   const [station, setStation] = useState(null);
