@@ -117,7 +117,7 @@ export default function WebcamViewer() {
 
         {/* Info bar */}
         <div className="flex items-center justify-between px-4 py-3 bg-muted/30 border-t border-border/50 text-xs text-muted-foreground">
-          <span>📍 Puerto deportivo de Benicàssim · Cámara exterior</span>
+          <span>📍 Webcam Benicasim Vela</span>
           <span>Fuente: Comunitat Valenciana Streaming</span>
         </div>
       </div>

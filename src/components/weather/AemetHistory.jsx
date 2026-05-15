@@ -49,7 +49,7 @@ export default function AemetHistory({ alerts = [] }) {
           <p className="text-xs text-muted-foreground mt-0.5">Últimos avisos recibidos por API</p>
         </div>
         <a href="https://www.aemet.es/documentos_d/eltiempo/prediccion/avisos/rss/CAP_AFAZ771204_RSS.xml" target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline font-medium">
-          RSS Litoral Sur →
+          RSS Castellón Litoral Sur →
         </a>
       </div>
 

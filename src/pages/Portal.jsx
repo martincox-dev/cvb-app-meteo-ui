@@ -7,6 +7,9 @@ import AemetHistory from "../components/weather/AemetHistory";
 import WindyMap from "../components/weather/WindyMap";
 import StationsMap from "../components/weather/StationsMap";
 import WebcamViewer from "../components/weather/WebcamViewer";
+import WindguruStationsSection from "../components/weather/WindguruStationsSection";
+
+const CVB_LOGO_URL = "https://media.base44.com/images/public/69fdcf37fbe3119a19af55e5/3447346e5_bandera_cvb_mono_print.svg";
 
 export default function Portal() {
   const [station, setStation] = useState(null);
@@ -39,7 +42,10 @@ export default function Portal() {
   if (!station) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-sm text-muted-foreground">Cargando datos meteo...</div>
+        <div className="flex flex-col items-center gap-3">
+          <img src={CVB_LOGO_URL} alt="Club de Vela Benicàssim" className="w-12 h-12" />
+          <div className="text-sm text-muted-foreground">Cargando datos meteo...</div>
+        </div>
       </div>
     );
   }
@@ -73,6 +79,9 @@ export default function Portal() {
 
         {/* Stations map */}
         <StationsMap stations={stations} />
+
+        {/* Windguru widgets */}
+        <WindguruStationsSection />
 
         {/* Webcam */}
         <WebcamViewer />

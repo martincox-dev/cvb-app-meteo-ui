@@ -79,7 +79,7 @@ export default function AemetAlerts({ alerts }) {
           rel="noopener noreferrer"
           className="text-xs text-primary hover:underline font-medium"
         >
-          RSS Litoral Sur →
+          RSS Castellón Litoral Sur →
         </a>
       </div>
       <div className="space-y-3">
