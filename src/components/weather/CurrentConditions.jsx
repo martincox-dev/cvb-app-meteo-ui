@@ -28,6 +28,8 @@ function StatCard({ icon: Icon, label, value, unit, color = "primary" }) {
 
 export default function CurrentConditions({ data }) {
   const { current } = data;
+  const oneDec = (v) => (Number.isFinite(Number(v)) ? Number(v).toFixed(1) : v);
+  const int0 = (v) => (Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : v);
 
   return (
     <section>
@@ -48,11 +50,11 @@ export default function CurrentConditions({ data }) {
           <div>
             <p className="text-white/70 text-sm font-medium mb-1">Viento</p>
             <div className="flex items-end gap-2">
-              <span className="text-5xl font-bold font-space">{current.windSpeed}</span>
+              <span className="text-5xl font-bold font-space">{oneDec(current.windSpeed)}</span>
               <span className="text-xl text-white/80 mb-1">kn</span>
             </div>
             <p className="text-white/80 text-sm mt-1">
-              Racha: <span className="font-semibold text-white">{current.windGust} kn</span>
+              Racha: <span className="font-semibold text-white">{oneDec(current.windGust)} kn</span>
             </p>
           </div>
           <div className="flex flex-col items-center gap-3">
@@ -64,11 +66,11 @@ export default function CurrentConditions({ data }) {
 
       {/* Grid of stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <StatCard icon={Thermometer} label="Temperatura" value={current.temp} unit="°C" color="warning" />
-        <StatCard icon={Waves} label="Temp. del Mar" value={current.seaTemp} unit="°C" color="accent" />
-        <StatCard icon={Droplets} label="Humedad" value={current.humidity} unit="%" color="primary" />
-        <StatCard icon={Gauge} label="Presión" value={current.pressure} unit=" hPa" color="ocean" />
-        <StatCard icon={Waves} label="Altura Ola" value={current.waveHeight} unit=" m" color="accent" />
+        <StatCard icon={Thermometer} label="Temperatura" value={oneDec(current.temp)} unit="°C" color="warning" />
+        <StatCard icon={Waves} label="Temp. del Mar" value={oneDec(current.seaTemp)} unit="°C" color="accent" />
+        <StatCard icon={Droplets} label="Humedad" value={int0(current.humidity)} unit="%" color="primary" />
+        <StatCard icon={Gauge} label="Presión" value={int0(current.pressure)} unit=" hPa" color="ocean" />
+        <StatCard icon={Waves} label="Altura Ola" value={oneDec(current.waveHeight)} unit=" m" color="accent" />
         <StatCard icon={Eye} label="Visibilidad" value={current.visibility} color="success" />
       </div>
     </section>

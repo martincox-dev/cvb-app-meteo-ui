@@ -39,6 +39,7 @@ const distDir = join(root, "dist");
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
 const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
+const round1 = (n) => (Number.isFinite(n) ? +Number(n).toFixed(1) : null);
 const json = (res, code, body) => {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -347,7 +348,7 @@ async function fetchOpenMeteo() {
 function avgNumeric(values = []) {
   const list = values.filter((v) => Number.isFinite(v));
   if (!list.length) return null;
-  return list.reduce((a, b) => a + b, 0) / list.length;
+  return round1(list.reduce((a, b) => a + b, 0) / list.length);
 }
 
 function parseWaveHeightFromAemetText(text = "") {
@@ -758,15 +759,15 @@ const server = createServer(async (req, res) => {
           : (windguru.nearest?.station?.name ? `Estación cercana: ${windguru.nearest.station.name}` : "Estación CVB - referencia local"),
         lastUpdate: new Date().toISOString(),
         current: {
-          windSpeed: windSpeed ?? 0,
-          windGust: windGust ?? 0,
+          windSpeed: round1(windSpeed ?? 0),
+          windGust: round1(windGust ?? 0),
           windDir: Number(windDir || 0),
           windDirText: getDirText(windDir),
-          temp: Number(avametBundle.interpolation?.temp ?? current.temperature_2m ?? 0).toFixed(1),
-          humidity: Number(avametBundle.interpolation?.humidity ?? current.relative_humidity_2m ?? 0),
-          pressure: Number(avametBundle.interpolation?.pressure ?? current.pressure_msl ?? 0).toFixed(1),
-          seaTemp: aemetMaritime.seaTemp != null ? Number(aemetMaritime.seaTemp).toFixed(1) : "N/D",
-          waveHeight: aemetMaritime.waveHeight != null ? Number(aemetMaritime.waveHeight).toFixed(1) : "N/D",
+          temp: round1(Number(avametBundle.interpolation?.temp ?? current.temperature_2m ?? 0)),
+          humidity: Math.round(Number(avametBundle.interpolation?.humidity ?? current.relative_humidity_2m ?? 0)),
+          pressure: Math.round(Number(avametBundle.interpolation?.pressure ?? current.pressure_msl ?? 0)),
+          seaTemp: aemetMaritime.seaTemp != null ? round1(Number(aemetMaritime.seaTemp)) : "N/D",
+          waveHeight: aemetMaritime.waveHeight != null ? round1(Number(aemetMaritime.waveHeight)) : "N/D",
           visibility: aemetMaritime.visibility || "No disponible",
           cloudCover: Number(current.cloud_cover ?? 0),
         },
