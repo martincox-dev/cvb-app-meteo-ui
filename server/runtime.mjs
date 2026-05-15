@@ -11,7 +11,7 @@ const AEMET_API_KEY = process.env.AEMET_API_KEY || "";
 const AEMET_TARGET_ZONE_CODES = (process.env.AEMET_TARGET_ZONE_CODES || "").split(",").map((s) => s.trim()).filter(Boolean);
 const AEMET_TARGET_KEYWORDS = (
   process.env.AEMET_TARGET_KEYWORDS ||
-  "Litoral sur de Castellón,Interior sur de Castellón,Aguas costeras de Castellón,Castellón sur"
+  "Litoral Sur Castellón,Litoral Sur Castellón - Costa"
 ).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
