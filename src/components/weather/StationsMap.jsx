@@ -36,8 +36,8 @@ export default function StationsMap({ stations = [] }) {
   return (
     <section>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-space font-semibold text-foreground text-lg">Estaciones meteorológicas accesibles por API</h2>
-        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuentes: AVAMET + AEMET API</span>
+        <h2 className="font-space font-semibold text-foreground text-lg">Estaciones AVAMET (Benicàssim y alrededores)</h2>
+        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuente: AVAMET</span>
       </div>
 
       <div className="bg-white rounded-2xl shadow-card overflow-hidden">

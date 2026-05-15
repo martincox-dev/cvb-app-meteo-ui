@@ -16,6 +16,12 @@ const AEMET_TARGET_KEYWORDS = (
 ).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
+const WINDGURU_UID = process.env.WINDGURU_UID || "";
+const WINDGURU_PASSWORD = process.env.WINDGURU_PASSWORD || "";
+const WINDGURU_STATION_IDS = (process.env.WINDGURU_STATION_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const AEMET_RSS_FEEDS = (
   process.env.AEMET_RSS_FEEDS ||
   "https://www.aemet.es/documentos_d/eltiempo/prediccion/avisos/rss/CAP_AFAZ771204_RSS.xml,https://www.aemet.es/documentos_d/eltiempo/prediccion/avisos/rss/CAP_AFAP7712_RSS.xml"
@@ -25,6 +31,8 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || "hello_world";
 const WHATSAPP_TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || "en_US";
 const WHATSAPP_TEST_TO = process.env.WHATSAPP_TEST_TO || "";
+const AVAMET_PRIMARY_IDS = ["c05m028e05", "c05m028e09"]; // Voramar + Heliópolis
+const AVAMET_AROUND_RADIUS_KM = Number(process.env.AVAMET_AROUND_RADIUS_KM || 20);
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -267,22 +275,48 @@ async function fetchAemetAlerts() {
 }
 
 async function fetchWindguruNearest() {
+  if (!WINDGURU_UID || !WINDGURU_PASSWORD || !WINDGURU_STATION_IDS.length) {
+    return { nearest: null, wind: null, gust: null, dir: null };
+  }
   try {
-    const data = await fetchJson(`${WINDGURU_STATIONS_URL}?id_station=all&format=json`);
-    const stations = Array.isArray(data) ? data : Array.isArray(data?.stations) ? data.stations : [];
+    const rows = [];
+    for (const id of WINDGURU_STATION_IDS) {
+      const u = new URL("https://www.windguru.cz/int/wgsapi.php");
+      u.searchParams.set("q", "station_data_current");
+      u.searchParams.set("id_station", id);
+      u.searchParams.set("uid", WINDGURU_UID);
+      u.searchParams.set("password", WINDGURU_PASSWORD);
+      const raw = await fetchJson(u.toString());
+      if (raw?.return === "error") continue;
+      const lat = Number(raw?.lat);
+      const lon = Number(raw?.lon);
+      rows.push({
+        id,
+        name: raw?.station_name || raw?.name || `WG ${id}`,
+        lat: Number.isFinite(lat) ? lat : null,
+        lon: Number.isFinite(lon) ? lon : null,
+        wind: Number(raw?.wind_avg ?? raw?.wind ?? raw?.wind_speed),
+        gust: Number(raw?.wind_max ?? raw?.gust),
+        dir: Number(raw?.wind_direction ?? raw?.wind_dir ?? raw?.dir),
+      });
+    }
+    const withCoord = rows.filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon));
+    const candidates = withCoord.length ? withCoord : rows;
+    if (!candidates.length) return { nearest: null, wind: null, gust: null, dir: null };
     let nearest = null;
-    for (const s of stations) {
-      const lat = Number(s?.lat);
-      const lon = Number(s?.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const d = haversineKm(LAT, LON, lat, lon);
+    for (const s of candidates) {
+      const d = Number.isFinite(s.lat) && Number.isFinite(s.lon) ? haversineKm(LAT, LON, s.lat, s.lon) : 99999;
       if (!nearest || d < nearest.distanceKm) nearest = { station: s, distanceKm: d };
     }
-    if (!nearest) return { nearest: null, wind: null, gust: null, dir: null };
-    const wind = Number(nearest.station.wind_avg ?? nearest.station.wind);
-    const gust = Number(nearest.station.wind_max ?? nearest.station.gust);
-    const dir = Number(nearest.station.wind_dir ?? nearest.station.dir);
-    return { nearest, wind: Number.isFinite(wind) ? +wind.toFixed(1) : null, gust: Number.isFinite(gust) ? +gust.toFixed(1) : null, dir: Number.isFinite(dir) ? dir : null };
+    const wind = Number(nearest.station.wind);
+    const gust = Number(nearest.station.gust);
+    const dir = Number(nearest.station.dir);
+    return {
+      nearest,
+      wind: Number.isFinite(wind) ? +wind.toFixed(1) : null,
+      gust: Number.isFinite(gust) ? +gust.toFixed(1) : null,
+      dir: Number.isFinite(dir) ? dir : null,
+    };
   } catch {
     return { nearest: null, wind: null, gust: null, dir: null };
   }
@@ -308,6 +342,53 @@ async function fetchOpenMeteo() {
   const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&current=wave_height,sea_surface_temperature&hourly=wave_height,wave_period`;
   const [meteo, marine] = await Promise.all([fetchJson(meteoUrl), fetchJson(marineUrl)]);
   return { meteo, marine };
+}
+
+function avgNumeric(values = []) {
+  const list = values.filter((v) => Number.isFinite(v));
+  if (!list.length) return null;
+  return list.reduce((a, b) => a + b, 0) / list.length;
+}
+
+function parseWaveHeightFromAemetText(text = "") {
+  const matches = [...String(text).matchAll(/(\d+(?:[.,]\d+)?)\s*(?:a|-)\s*(\d+(?:[.,]\d+)?)\s*m/gi)];
+  if (matches.length) {
+    const vals = matches.map((m) => Number(String(m[2]).replace(",", "."))).filter(Number.isFinite);
+    if (vals.length) return Math.max(...vals);
+  }
+  const one = String(text).match(/(\d+(?:[.,]\d+)?)\s*m/);
+  if (one) {
+    const v = Number(String(one[1]).replace(",", "."));
+    if (Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+function parseVisibilityFromAemetText(text = "") {
+  const t = String(text).toLowerCase();
+  if (t.includes("muy buena")) return "Muy buena";
+  if (t.includes("buena")) return "Buena";
+  if (t.includes("regular")) return "Regular";
+  if (t.includes("mala")) return "Mala";
+  if (t.includes("muy mala")) return "Muy mala";
+  return "No especificada";
+}
+
+async function fetchAemetMaritimeCastellon() {
+  try {
+    const html = await fetchText("https://www.aemet.es/es/eltiempo/prediccion/maritima?area=val1&opc1=0&opc3=1");
+    const blockMatch = html.match(/Aguas costeras de Castell[\s\S]*?<div>([\s\S]*?)<\/div>/i);
+    const text = blockMatch ? htmlDecode(blockMatch[1]) : "";
+    return {
+      source: "AEMET marítima oficial",
+      text,
+      waveHeight: parseWaveHeightFromAemetText(text),
+      visibility: parseVisibilityFromAemetText(text),
+      seaTemp: null, // AEMET marítima texto no publica valor numérico fijo de SST por zona costera.
+    };
+  } catch {
+    return { source: "AEMET marítima oficial", text: "", waveHeight: null, visibility: "No disponible", seaTemp: null };
+  }
 }
 
 function contentType(path) {
@@ -435,28 +516,60 @@ async function fetchCastellonStations() {
   }
 }
 
-async function fetchAvametStation() {
+async function fetchAvametBenicasimStations() {
   try {
     const data = await fetchJson("https://www.avamet.org/mxo-i-2023.json");
-    const row = Array.isArray(data) ? data.find((s) => s.esta === "c05m028e07") : null;
-    if (!row) return null;
-    const windKmh = Number(row.vent || 0);
-    const gustKmh = Number(row.vent_max || 0);
-    return {
-      id: "c05m028e07",
-      name: htmlDecode(row.nomd || "Benicàssim - Cim del Bartolo"),
-      lat: Number(row.lati),
-      lon: Number(row.logi),
-      // AVAMET reports wind in km/h. Convert to knots for UI consistency.
-      wind: kmhToKn(windKmh),
-      gust: kmhToKn(gustKmh),
-      dir: Number(row.vent_dir || 0),
-      temp: Number(row.temp || 0),
-      humidity: Number(row.hrel || 0),
-      source: "AVAMET",
-    };
+    const rows = Array.isArray(data) ? data : [];
+    const around = rows
+      .map((row) => {
+        const lat = Number(row.lati);
+        const lon = Number(row.logi);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        const distKm = haversineKm(LAT, LON, lat, lon);
+        if (distKm > AVAMET_AROUND_RADIUS_KM) return null;
+        const windKmh = Number(row.vent);
+        const gustKmh = Number(row.vent_max);
+        const temp = Number(row.temp);
+        const humidity = Number(row.hrel);
+        const pressure = Number(row.pres);
+        const dir = Number(row.vent_dir);
+        return {
+          id: String(row.esta || ""),
+          name: htmlDecode(row.nomd || "Estación AVAMET"),
+          lat,
+          lon,
+          distKm: +distKm.toFixed(1),
+          wind: Number.isFinite(windKmh) ? kmhToKn(windKmh) : null,
+          gust: Number.isFinite(gustKmh) ? kmhToKn(gustKmh) : null,
+          dir: Number.isFinite(dir) ? dir : null,
+          temp: Number.isFinite(temp) ? temp : null,
+          humidity: Number.isFinite(humidity) ? humidity : null,
+          pressure: Number.isFinite(pressure) ? pressure : null,
+          source: "AVAMET",
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.distKm - b.distKm)
+      .slice(0, 60);
+
+    const primary = around.filter((s) => AVAMET_PRIMARY_IDS.includes(s.id));
+    const interpolation = primary.length
+      ? {
+          name: "Estación CVB interpolada (Voramar + Heliópolis)",
+          wind: avgNumeric(primary.map((s) => s.wind)),
+          gust: avgNumeric(primary.map((s) => s.gust)),
+          dir: avgNumeric(primary.map((s) => s.dir)),
+          temp: avgNumeric(primary.map((s) => s.temp)),
+          humidity: avgNumeric(primary.map((s) => s.humidity)),
+          pressure: avgNumeric(primary.map((s) => s.pressure)),
+          source: "Interpolación AVAMET",
+          satellites: primary.map((s) => ({ id: s.id, name: s.name })),
+        }
+      : null;
+
+    return { around, primary, interpolation };
   } catch {
-    return null;
+    return { around: [], primary: [], interpolation: null };
   }
 }
 
@@ -608,21 +721,21 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/meteo") {
-      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, stations, avametStation] = await Promise.all([
+      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, avametBundle, aemetMaritime] = await Promise.all([
         fetchOpenMeteo(),
         fetchWindyPoint(),
         fetchWindguruNearest(),
         fetchAemetAlerts(),
         fetchAemetAlertsFromRssCap(),
         fetchAemetAlertsArchive(5),
-        fetchCastellonStations(),
-        fetchAvametStation(),
+        fetchAvametBenicasimStations(),
+        fetchAemetMaritimeCastellon(),
       ]);
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
-      const windSpeed = avametStation?.wind ?? windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
-      const windGust = avametStation?.gust ?? windguru.gust ?? windy.gust ?? toKn(current.wind_gusts_10m);
-      const windDir = avametStation?.dir ?? windguru.dir ?? windy.dir ?? current.wind_direction_10m ?? 0;
+      const windSpeed = avametBundle.interpolation?.wind ?? windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
+      const windGust = avametBundle.interpolation?.gust ?? windguru.gust ?? windy.gust ?? toKn(current.wind_gusts_10m);
+      const windDir = avametBundle.interpolation?.dir ?? windguru.dir ?? windy.dir ?? current.wind_direction_10m ?? 0;
       const hourly = (meteo.hourly?.time || []).slice(0, 12).map((t, i) => ({
         time: new Date(t).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
         wind: toKn(meteo.hourly.wind_speed_10m?.[i]) ?? 0,
@@ -640,8 +753,8 @@ const server = createServer(async (req, res) => {
         seaState: "Marejadilla",
       }));
       const station = {
-        name: avametStation?.name
-          ? `Estación local: ${avametStation.name}`
+        name: avametBundle.interpolation?.name
+          ? avametBundle.interpolation.name
           : (windguru.nearest?.station?.name ? `Estación cercana: ${windguru.nearest.station.name}` : "Estación CVB - referencia local"),
         lastUpdate: new Date().toISOString(),
         current: {
@@ -649,12 +762,12 @@ const server = createServer(async (req, res) => {
           windGust: windGust ?? 0,
           windDir: Number(windDir || 0),
           windDirText: getDirText(windDir),
-          temp: Number(avametStation?.temp ?? current.temperature_2m ?? 0).toFixed(1),
-          humidity: Number(avametStation?.humidity ?? current.relative_humidity_2m ?? 0),
-          pressure: Number(current.pressure_msl ?? 0).toFixed(1),
-          seaTemp: Number(marineCurrent.sea_surface_temperature ?? 0).toFixed(1),
-          waveHeight: Number(marineCurrent.wave_height ?? 0).toFixed(1),
-          visibility: "Buena",
+          temp: Number(avametBundle.interpolation?.temp ?? current.temperature_2m ?? 0).toFixed(1),
+          humidity: Number(avametBundle.interpolation?.humidity ?? current.relative_humidity_2m ?? 0),
+          pressure: Number(avametBundle.interpolation?.pressure ?? current.pressure_msl ?? 0).toFixed(1),
+          seaTemp: aemetMaritime.seaTemp != null ? Number(aemetMaritime.seaTemp).toFixed(1) : "N/D",
+          waveHeight: aemetMaritime.waveHeight != null ? Number(aemetMaritime.waveHeight).toFixed(1) : "N/D",
+          visibility: aemetMaritime.visibility || "No disponible",
           cloudCover: Number(current.cloud_cover ?? 0),
         },
         hourly,
@@ -667,10 +780,7 @@ const server = createServer(async (req, res) => {
         .slice(0, 30);
 
       const mergedAlerts = aemetAlerts.length ? aemetAlerts : aemetRssAlerts;
-      const mergedStations = [...(stations || [])];
-      if (avametStation && Number.isFinite(avametStation.lat) && Number.isFinite(avametStation.lon)) {
-        mergedStations.unshift(avametStation);
-      }
+      const mergedStations = [...(avametBundle.around || [])];
 
       return json(res, 200, {
         ok: true,
@@ -681,6 +791,7 @@ const server = createServer(async (req, res) => {
           description: "Sin avisos activos o clave AEMET no configurada.", validFrom: new Date().toISOString(), validTo: new Date(Date.now() + 6 * 3600 * 1000).toISOString(), source: "AEMET",
         }],
         aemetHistory: aemetHistory.length ? aemetHistory : (mergedAlerts || []),
+        aemetMaritime,
       });
     }
 
