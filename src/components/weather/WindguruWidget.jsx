@@ -1,10 +1,36 @@
-const WINDGURU_STATIONS = {
-  "1305": "https://www.windguru.cz/station/1305",
-  "2706": "https://www.windguru.cz/station/2706",
-};
+import { useEffect, useMemo, useRef } from "react";
 
-export default function WindguruWidget({ stationId, title }) {
-  const baseUrl = WINDGURU_STATIONS[String(stationId)] || `https://www.windguru.cz/station/${stationId}`;
+export default function WindguruWidget({ title }) {
+  const mountRef = useRef(null);
+  const uid = useMemo(() => `wg_fwdg_853188_52_${Date.now()}`, []);
+  const baseUrl = "https://www.windguru.cz";
+
+  useEffect(() => {
+    if (!mountRef.current) return;
+    mountRef.current.innerHTML = "";
+
+    const arg = [
+      "s=853188",
+      "m=52",
+      `uid=${uid}`,
+      "wj=knots",
+      "tj=c",
+      "waj=m",
+      "tij=cm",
+      "odh=0",
+      "doh=24",
+      "fhours=240",
+      "hrsm=2",
+      "vt=forecasts",
+      "lng=en",
+      "p=WINDSPD,GUST,SMER,TMP,WCHILL,CDC,APCP1s,RH",
+    ];
+
+    const script = document.createElement("script");
+    script.src = `https://www.windguru.cz/js/widget.php?${arg.join("&")}`;
+    script.async = true;
+    mountRef.current.appendChild(script);
+  }, [uid]);
 
   return (
     <article className="bg-white rounded-xl border border-border/60 shadow-card overflow-hidden">
@@ -20,16 +46,14 @@ export default function WindguruWidget({ stationId, title }) {
         </a>
       </header>
       <div className="px-4 py-5 bg-muted/20">
-        <p className="text-sm text-muted-foreground">
-          Windguru bloquea la carga embebida en <code>iframe</code> en dominios externos.
-        </p>
+        <div ref={mountRef} id={uid} />
         <a
           href={baseUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex mt-3 text-sm text-primary hover:underline font-medium"
         >
-          Abrir estación {stationId} en Windguru
+          Abrir Windguru
         </a>
       </div>
     </article>
