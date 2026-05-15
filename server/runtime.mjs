@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
@@ -15,6 +16,10 @@ const AEMET_TARGET_KEYWORDS = (
 ).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
+const AEMET_RSS_FEEDS = (
+  process.env.AEMET_RSS_FEEDS ||
+  "https://www.aemet.es/documentos_d/eltiempo/prediccion/avisos/rss/CAP_AFAZ771204_RSS.xml,https://www.aemet.es/documentos_d/eltiempo/prediccion/avisos/rss/CAP_AFAP7712_RSS.xml"
+).split(",").map((s) => s.trim()).filter(Boolean);
 const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN || "";
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || "hello_world";
@@ -47,6 +52,102 @@ async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.json();
+}
+
+function htmlDecode(input = "") {
+  return String(input)
+    .replace(/&agrave;/g, "à").replace(/&egrave;/g, "è").replace(/&ograve;/g, "ò")
+    .replace(/&iacute;/g, "í").replace(/&oacute;/g, "ó").replace(/&uacute;/g, "ú")
+    .replace(/&aacute;/g, "á").replace(/&eacute;/g, "é").replace(/&ntilde;/g, "ñ")
+    .replace(/&ccedil;/g, "ç").replace(/&quot;/g, "\"").replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
+async function fetchText(url, options = {}) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+  return res.text();
+}
+
+function getTag(xml, tag) {
+  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "i"));
+  return m ? m[1].trim() : "";
+}
+
+function parseTarFromGzipBuffer(gzipBuffer) {
+  const buf = gunzipSync(gzipBuffer);
+  const entries = [];
+  let offset = 0;
+  while (offset + 512 <= buf.length) {
+    const header = buf.subarray(offset, offset + 512);
+    const name = header.subarray(0, 100).toString("utf8").replace(/\0+$/, "");
+    if (!name) break;
+    const sizeOct = header.subarray(124, 136).toString("utf8").replace(/\0/g, "").trim();
+    const size = parseInt(sizeOct || "0", 8) || 0;
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    entries.push({ name, content: buf.subarray(dataStart, dataEnd).toString("utf8") });
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+function parseCapXmlToAlerts(xml) {
+  const infoBlocks = [...xml.matchAll(/<info[\s\S]*?<\/info>/gi)].map((m) => m[0]);
+  const alerts = [];
+  for (const block of infoBlocks) {
+    const event = getTag(block, "event");
+    const severity = getTag(block, "severity");
+    const description = getTag(block, "description");
+    const effective = getTag(block, "effective");
+    const expires = getTag(block, "expires");
+    const areaDesc = getTag(block, "areaDesc");
+    const headline = getTag(block, "headline");
+    const certainty = getTag(block, "certainty");
+    if (!event && !description && !areaDesc) continue;
+    alerts.push({
+      id: `cap-${Math.random().toString(36).slice(2, 10)}`,
+      level: String(severity || "").toLowerCase().includes("extreme")
+        ? "rojo"
+        : String(severity || "").toLowerCase().includes("severe")
+          ? "naranja"
+          : String(severity || "").toLowerCase().includes("moderate")
+            ? "amarillo"
+            : "verde",
+      levelLabel: severity || "Aviso",
+      phenomenon: event || "Aviso meteorológico",
+      area: areaDesc || "Castellón",
+      description: htmlDecode(description || headline || ""),
+      validFrom: effective || new Date().toISOString(),
+      validTo: expires || new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
+      source: "AEMET RSS/CAP",
+      certainty: certainty || "",
+    });
+  }
+  return alerts;
+}
+
+async function fetchAemetAlertsFromRssCap() {
+  const allAlerts = [];
+  for (const rssUrl of AEMET_RSS_FEEDS) {
+    try {
+      const rss = await fetchText(rssUrl);
+      const tarLink = getTag(rss, "link").includes(".tar.gz")
+        ? getTag(rss, "link")
+        : ((rss.match(/<link>(https?:\/\/[^<]+\.tar\.gz)<\/link>/i) || [])[1] || "");
+      if (!tarLink) continue;
+      const resp = await fetch(tarLink);
+      if (!resp.ok) continue;
+      const gzBuf = Buffer.from(await resp.arrayBuffer());
+      const files = parseTarFromGzipBuffer(gzBuf).filter((f) => f.name.toLowerCase().endsWith(".xml"));
+      for (const f of files) allAlerts.push(...parseCapXmlToAlerts(f.content));
+    } catch {
+      // ignore per feed and continue
+    }
+  }
+  return allAlerts.filter((a) => isInTargetAemetZone(a));
 }
 
 async function parseBody(req) {
@@ -333,6 +434,28 @@ async function fetchCastellonStations() {
   }
 }
 
+async function fetchAvametStation() {
+  try {
+    const data = await fetchJson("https://www.avamet.org/mxo-i-2023.json");
+    const row = Array.isArray(data) ? data.find((s) => s.esta === "c05m028e07") : null;
+    if (!row) return null;
+    return {
+      id: "c05m028e07",
+      name: htmlDecode(row.nomd || "Benicàssim - Cim del Bartolo"),
+      lat: Number(row.lati),
+      lon: Number(row.logi),
+      wind: Number(row.vent || 0),
+      gust: Number(row.vent_max || 0),
+      dir: Number(row.vent_dir || 0),
+      temp: Number(row.temp || 0),
+      humidity: Number(row.hrel || 0),
+      source: "AVAMET",
+    };
+  } catch {
+    return null;
+  }
+}
+
 function alertRank(level) {
   if (level === "rojo") return 4;
   if (level === "naranja") return 3;
@@ -428,13 +551,15 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/meteo") {
-      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetArchiveRaw, stations] = await Promise.all([
+      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, stations, avametStation] = await Promise.all([
         fetchOpenMeteo(),
         fetchWindyPoint(),
         fetchWindguruNearest(),
         fetchAemetAlerts(),
+        fetchAemetAlertsFromRssCap(),
         fetchAemetAlertsArchive(5),
         fetchCastellonStations(),
+        fetchAvametStation(),
       ]);
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
@@ -482,15 +607,21 @@ const server = createServer(async (req, res) => {
         .sort((a, b) => new Date(b.validFrom).getTime() - new Date(a.validFrom).getTime())
         .slice(0, 30);
 
+      const mergedAlerts = aemetAlerts.length ? aemetAlerts : aemetRssAlerts;
+      const mergedStations = [...(stations || [])];
+      if (avametStation && Number.isFinite(avametStation.lat) && Number.isFinite(avametStation.lon)) {
+        mergedStations.unshift(avametStation);
+      }
+
       return json(res, 200, {
         ok: true,
         station,
-        stations,
-        aemetAlerts: aemetAlerts.length ? aemetAlerts : [{
+        stations: mergedStations,
+        aemetAlerts: mergedAlerts.length ? mergedAlerts : [{
           id: "no-alert", level: "verde", levelLabel: "Sin Avisos Activos", phenomenon: "General", area: "Litoral Castellón",
           description: "Sin avisos activos o clave AEMET no configurada.", validFrom: new Date().toISOString(), validTo: new Date(Date.now() + 6 * 3600 * 1000).toISOString(), source: "AEMET",
         }],
-        aemetHistory: aemetHistory.length ? aemetHistory : (aemetAlerts || []),
+        aemetHistory: aemetHistory.length ? aemetHistory : (mergedAlerts || []),
       });
     }
 
