@@ -220,6 +220,101 @@ function contentType(path) {
   return "application/octet-stream";
 }
 
+function toAemetUtc(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
+    `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}UTC`
+  );
+}
+
+async function fetchAemetAlertsArchive(days = 3) {
+  if (!AEMET_API_KEY) return [];
+  try {
+    const end = new Date();
+    const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const url =
+      `https://opendata.aemet.es/opendata/api/avisos_cap/archivo/fechaini/${toAemetUtc(start)}/fechafin/${toAemetUtc(end)}`;
+    const idx = await fetchJson(url, { headers: { api_key: AEMET_API_KEY } });
+    if (!idx?.datos) return [];
+    const raw = await fetchJson(idx.datos);
+    const list = Array.isArray(raw) ? raw : [raw];
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+function mapAemetAlertRaw(a, i = 0) {
+  const sev = String(a?.nivel || a?.severity || "").toLowerCase();
+  let level = "verde";
+  if (sev.includes("amar")) level = "amarillo";
+  if (sev.includes("naran")) level = "naranja";
+  if (sev.includes("rojo")) level = "rojo";
+  const areaText = String(a?.ambito || a?.area || a?.geocode || "Litoral Castellón");
+  const areaCode = String(a?.idZona || a?.code || a?.geocode || a?.id || "");
+  const desc = String(
+    a?.descripcion ||
+    a?.description ||
+    a?.instruction ||
+    a?.headline ||
+    a?.event ||
+    "Aviso oficial de AEMET"
+  );
+  return {
+    id: String(a?.id || `aemet-${i}`),
+    areaCode,
+    level,
+    levelLabel: level === "amarillo" ? "Aviso Amarillo" : level === "naranja" ? "Aviso Naranja" : level === "rojo" ? "Aviso Rojo" : "Sin Aviso",
+    phenomenon: a?.fenomeno || a?.phenomenon || "Aviso meteorológico",
+    area: areaText,
+    description: desc,
+    validFrom: a?.inicio || a?.effective || new Date().toISOString(),
+    validTo: a?.fin || a?.expires || new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
+    raw: a,
+    source: "AEMET",
+  };
+}
+
+function isInTargetAemetZone(alert) {
+  const haystack = `${alert.area} ${alert.description}`.toLowerCase();
+  const byKeyword = AEMET_TARGET_KEYWORDS.some((k) => haystack.includes(k));
+  const byCode = AEMET_TARGET_ZONE_CODES.length
+    ? AEMET_TARGET_ZONE_CODES.some((c) => String(alert.areaCode).includes(c))
+    : false;
+  return byKeyword || byCode;
+}
+
+async function fetchCastellonStations() {
+  try {
+    const data = await fetchJson(`${WINDGURU_STATIONS_URL}?id_station=all&format=json`);
+    const stations = Array.isArray(data) ? data : Array.isArray(data?.stations) ? data.stations : [];
+    const inBox = stations
+      .filter((s) => {
+        const lat = Number(s?.lat);
+        const lon = Number(s?.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+        // Provincia de Castellón aprox.
+        return lat >= 39.6 && lat <= 40.9 && lon >= -0.6 && lon <= 0.8;
+      })
+      .map((s) => ({
+        id: String(s?.id_station || s?.id || s?.name || Math.random()),
+        name: String(s?.name || s?.station || "Estación"),
+        lat: Number(s?.lat),
+        lon: Number(s?.lon),
+        wind: Number(s?.wind_avg ?? s?.wind ?? 0),
+        gust: Number(s?.wind_max ?? s?.gust ?? 0),
+        dir: Number(s?.wind_dir ?? s?.dir ?? 0),
+        temp: Number(s?.temperature ?? s?.temp ?? 0),
+        humidity: Number(s?.humidity ?? 0),
+        source: "Windguru Stations API",
+      }));
+    return inBox.slice(0, 25);
+  } catch {
+    return [];
+  }
+}
+
 function alertRank(level) {
   if (level === "rojo") return 4;
   if (level === "naranja") return 3;
@@ -315,7 +410,14 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/meteo") {
-      const [{ meteo, marine }, windy, windguru, aemetAlerts] = await Promise.all([fetchOpenMeteo(), fetchWindyPoint(), fetchWindguruNearest(), fetchAemetAlerts()]);
+      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetArchiveRaw, stations] = await Promise.all([
+        fetchOpenMeteo(),
+        fetchWindyPoint(),
+        fetchWindguruNearest(),
+        fetchAemetAlerts(),
+        fetchAemetAlertsArchive(5),
+        fetchCastellonStations(),
+      ]);
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
       const windSpeed = windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
@@ -356,13 +458,21 @@ const server = createServer(async (req, res) => {
         hourly,
         forecast,
       };
+      const aemetHistory = aemetArchiveRaw
+        .map((a, i) => mapAemetAlertRaw(a, i))
+        .filter((a) => isInTargetAemetZone(a))
+        .sort((a, b) => new Date(b.validFrom).getTime() - new Date(a.validFrom).getTime())
+        .slice(0, 30);
+
       return json(res, 200, {
         ok: true,
         station,
+        stations,
         aemetAlerts: aemetAlerts.length ? aemetAlerts : [{
           id: "no-alert", level: "verde", levelLabel: "Sin Avisos Activos", phenomenon: "General", area: "Litoral Castellón",
           description: "Sin avisos activos o clave AEMET no configurada.", validFrom: new Date().toISOString(), validTo: new Date(Date.now() + 6 * 3600 * 1000).toISOString(), source: "AEMET",
         }],
+        aemetHistory: aemetHistory.length ? aemetHistory : (aemetAlerts || []),
       });
     }
 
