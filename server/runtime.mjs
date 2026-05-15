@@ -30,6 +30,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
+const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
 const json = (res, code, body) => {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -439,13 +440,16 @@ async function fetchAvametStation() {
     const data = await fetchJson("https://www.avamet.org/mxo-i-2023.json");
     const row = Array.isArray(data) ? data.find((s) => s.esta === "c05m028e07") : null;
     if (!row) return null;
+    const windKmh = Number(row.vent || 0);
+    const gustKmh = Number(row.vent_max || 0);
     return {
       id: "c05m028e07",
       name: htmlDecode(row.nomd || "Benicàssim - Cim del Bartolo"),
       lat: Number(row.lati),
       lon: Number(row.logi),
-      wind: Number(row.vent || 0),
-      gust: Number(row.vent_max || 0),
+      // AVAMET reports wind in km/h. Convert to knots for UI consistency.
+      wind: kmhToKn(windKmh),
+      gust: kmhToKn(gustKmh),
       dir: Number(row.vent_dir || 0),
       temp: Number(row.temp || 0),
       humidity: Number(row.hrel || 0),
@@ -616,9 +620,9 @@ const server = createServer(async (req, res) => {
       ]);
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
-      const windSpeed = windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
-      const windGust = windguru.gust ?? windy.gust ?? toKn(current.wind_gusts_10m);
-      const windDir = windguru.dir ?? windy.dir ?? current.wind_direction_10m ?? 0;
+      const windSpeed = avametStation?.wind ?? windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
+      const windGust = avametStation?.gust ?? windguru.gust ?? windy.gust ?? toKn(current.wind_gusts_10m);
+      const windDir = avametStation?.dir ?? windguru.dir ?? windy.dir ?? current.wind_direction_10m ?? 0;
       const hourly = (meteo.hourly?.time || []).slice(0, 12).map((t, i) => ({
         time: new Date(t).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
         wind: toKn(meteo.hourly.wind_speed_10m?.[i]) ?? 0,
@@ -636,15 +640,17 @@ const server = createServer(async (req, res) => {
         seaState: "Marejadilla",
       }));
       const station = {
-        name: windguru.nearest?.station?.name ? `Estación cercana: ${windguru.nearest.station.name}` : "Estación CVB - referencia local",
+        name: avametStation?.name
+          ? `Estación local: ${avametStation.name}`
+          : (windguru.nearest?.station?.name ? `Estación cercana: ${windguru.nearest.station.name}` : "Estación CVB - referencia local"),
         lastUpdate: new Date().toISOString(),
         current: {
           windSpeed: windSpeed ?? 0,
           windGust: windGust ?? 0,
           windDir: Number(windDir || 0),
           windDirText: getDirText(windDir),
-          temp: Number(current.temperature_2m ?? 0).toFixed(1),
-          humidity: Number(current.relative_humidity_2m ?? 0),
+          temp: Number(avametStation?.temp ?? current.temperature_2m ?? 0).toFixed(1),
+          humidity: Number(avametStation?.humidity ?? current.relative_humidity_2m ?? 0),
           pressure: Number(current.pressure_msl ?? 0).toFixed(1),
           seaTemp: Number(marineCurrent.sea_surface_temperature ?? 0).toFixed(1),
           waveHeight: Number(marineCurrent.wave_height ?? 0).toFixed(1),
