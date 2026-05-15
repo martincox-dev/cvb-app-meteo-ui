@@ -48,7 +48,7 @@ export default function AemetHistory({ alerts = [] }) {
           <h2 className="font-space font-semibold text-foreground text-lg">Historial de Avisos AEMET</h2>
           <p className="text-xs text-muted-foreground mt-0.5">Últimos avisos recibidos por API</p>
         </div>
-        <a href="https://www.aemet.es/es/eltiempo/prediccion/avisos?p=46" target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline font-medium">
+        <a href="https://www.aemet.es/es/rss_info/avisos/val" target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline font-medium">
           Ver en AEMET →
         </a>
       </div>

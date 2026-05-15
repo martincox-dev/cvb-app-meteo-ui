@@ -74,7 +74,7 @@ export default function AemetAlerts({ alerts }) {
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-space font-semibold text-foreground text-lg">Alertas AEMET</h2>
         <a
-          href="https://www.aemet.es/es/eltiempo/prediccion/avisos?p=46"
+          href="https://www.aemet.es/es/rss_info/avisos/val"
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs text-primary hover:underline font-medium"
