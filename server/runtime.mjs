@@ -34,6 +34,8 @@ const WHATSAPP_TEST_TO = process.env.WHATSAPP_TEST_TO || "";
 const AVAMET_PRIMARY_IDS = ["c05m028e05", "c05m028e09"]; // Voramar + Heliópolis
 const AVAMET_AROUND_RADIUS_KM = Number(process.env.AVAMET_AROUND_RADIUS_KM || 20);
 const AVAMET_MAP_IDS = ["c05m028e05", "c05m028e09", "c05m085e03", "c05m028e07", "c05m085e04", "c05m040e19"];
+const AEMET_PLAYA_ID = "1202802"; // fijo Benicàssim
+const AEMET_VIS_STATION_ID = "8500A"; // Castellón-Almassora
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -63,6 +65,18 @@ async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.json();
+}
+
+async function fetchJsonRetry(url, options = {}, retries = 2) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fetchJson(url, options);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 function htmlDecode(input = "") {
@@ -385,6 +399,14 @@ function visibilityFromMeters(meters) {
   return "Mala";
 }
 
+function visibilityFromAemetVv(vvKm) {
+  if (!Number.isFinite(vvKm)) return "No disponible";
+  if (vvKm >= 10) return "Muy buena";
+  if (vvKm >= 5) return "Buena";
+  if (vvKm >= 2) return "Regular";
+  return "Mala";
+}
+
 function circularMeanDeg(values = []) {
   const vals = values.filter((v) => Number.isFinite(v));
   if (!vals.length) return null;
@@ -395,19 +417,50 @@ function circularMeanDeg(values = []) {
 }
 
 async function fetchAemetMaritimeCastellon() {
+  const out = {
+    source: "AEMET oficial (playa+marítima+obs)",
+    text: "",
+    waveHeight: null,
+    visibility: "No especificada",
+    seaTemp: null,
+  };
   try {
+    if (AEMET_API_KEY) {
+      const idxPlaya = await fetchJsonRetry(
+        `https://opendata.aemet.es/opendata/api/prediccion/especifica/playa/${AEMET_PLAYA_ID}`,
+        { headers: { api_key: AEMET_API_KEY } },
+      );
+      if (idxPlaya?.datos) {
+        const beach = await fetchJsonRetry(idxPlaya.datos, { headers: { "User-Agent": "Mozilla/5.0" } });
+        const day = Array.isArray(beach) ? beach?.[0]?.prediccion?.dia?.[0] : null;
+        const tAgua = Number(day?.tAgua?.valor1 ?? day?.tagua?.valor1);
+        if (Number.isFinite(tAgua)) out.seaTemp = tAgua;
+        const oleDesc = String(day?.oleaje?.descripcion2 || day?.oleaje?.descripcion1 || "").trim();
+        if (oleDesc) out.text = out.text ? `${out.text} ${oleDesc}` : oleDesc;
+      }
+
+      const idxObs = await fetchJsonRetry(
+        `https://opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/${AEMET_VIS_STATION_ID}`,
+        { headers: { api_key: AEMET_API_KEY } },
+      );
+      if (idxObs?.datos) {
+        const obs = await fetchJsonRetry(idxObs.datos, { headers: { "User-Agent": "Mozilla/5.0" } });
+        const vv = Number(Array.isArray(obs) ? obs?.[0]?.vv : null); // km horizontal visibility
+        out.visibility = visibilityFromAemetVv(vv);
+      }
+    }
+
     const html = await fetchText("https://www.aemet.es/es/eltiempo/prediccion/maritima?area=val1&opc1=0&opc3=1");
     const blockMatch = html.match(/Aguas costeras de Castell[\s\S]*?<div>([\s\S]*?)<\/div>/i);
     const text = blockMatch ? htmlDecode(blockMatch[1]) : "";
-    return {
-      source: "AEMET marítima oficial",
-      text,
-      waveHeight: parseWaveHeightFromAemetText(text),
-      visibility: parseVisibilityFromAemetText(text),
-      seaTemp: null, // AEMET marítima texto no publica valor numérico fijo de SST por zona costera.
-    };
+    out.text = out.text ? `${out.text} ${text}`.trim() : text;
+    out.waveHeight = parseWaveHeightFromAemetText(text);
+    if (!out.visibility || out.visibility === "No especificada") {
+      out.visibility = parseVisibilityFromAemetText(text);
+    }
+    return out;
   } catch {
-    return { source: "AEMET marítima oficial", text: "", waveHeight: null, visibility: "No disponible", seaTemp: null };
+    return out;
   }
 }
 

@@ -57,7 +57,7 @@ export default function StationsMap({ stations = [] }) {
           ))}
         </div>
 
-        <MapContainer center={center} zoom={9} style={{ height: 480, width: "100%" }} scrollWheelZoom={false}>
+        <MapContainer center={center} zoom={11} style={{ height: 480, width: "100%" }} scrollWheelZoom={false}>
           <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
           {stations.map((st, idx) => (
