@@ -39,6 +39,10 @@ const AEMET_VIS_STATION_ID = "8500A"; // Castellón-Almassora
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
+const SAMPLE_RETENTION_MS = 31 * 24 * 60 * 60 * 1000;
+const SAMPLE_INTERVAL_MS = 2 * 60 * 1000;
+let LAST_AVAMET_BUNDLE = { around: [], primary: [], interpolation: null };
+let INTERPOLATED_SAMPLES = [];
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
 const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
@@ -591,7 +595,7 @@ async function fetchCastellonStations() {
 
 async function fetchAvametBenicasimStations() {
   try {
-    const data = await fetchJson("https://www.avamet.org/mxo-i-2023.json");
+    const data = await fetchJsonRetry("https://www.avamet.org/mxo-i-2023.json", {}, 2);
     const rows = Array.isArray(data) ? data : [];
     const around = rows
       .map((row) => {
@@ -640,10 +644,56 @@ async function fetchAvametBenicasimStations() {
         }
       : null;
 
-    return { around, primary, interpolation };
+    const out = { around, primary, interpolation };
+    if (around.length) LAST_AVAMET_BUNDLE = out;
+    return out;
   } catch {
-    return { around: [], primary: [], interpolation: null };
+    return LAST_AVAMET_BUNDLE;
   }
+}
+
+async function pollInterpolatedSample() {
+  try {
+    const bundle = await fetchAvametBenicasimStations();
+    const i = bundle?.interpolation;
+    if (!i) return;
+    const now = Date.now();
+    INTERPOLATED_SAMPLES.push({
+      ts: now,
+      wind: round1(i.wind),
+      gust: round1(i.gust),
+      dir: round1(i.dir),
+      temp: round1(i.temp),
+      humidity: Number.isFinite(i.humidity) ? Math.round(i.humidity) : null,
+      pressure: Number.isFinite(i.pressure) ? Math.round(i.pressure) : null,
+    });
+    const cutoff = now - SAMPLE_RETENTION_MS;
+    INTERPOLATED_SAMPLES = INTERPOLATED_SAMPLES.filter((s) => s.ts >= cutoff);
+  } catch {
+    // ignore polling errors
+  }
+}
+
+function hourlyFromSamples() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const today = INTERPOLATED_SAMPLES.filter((s) => s.ts >= start);
+  if (!today.length) return [];
+  const byHour = new Map();
+  for (const s of today) {
+    const h = new Date(s.ts).getHours();
+    if (!byHour.has(h)) byHour.set(h, []);
+    byHour.get(h).push(s);
+  }
+  return [...byHour.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .slice(-12)
+    .map(([h, list]) => ({
+      time: `${String(h).padStart(2, "0")}:00`,
+      wind: round1(avgNumeric(list.map((x) => x.wind)) ?? 0),
+      gust: round1(Math.max(...list.map((x) => Number(x.gust || 0))) || 0),
+      dir: round1(circularMeanDeg(list.map((x) => x.dir)) ?? 0),
+    }));
 }
 
 function alertRank(level) {
@@ -809,12 +859,14 @@ const server = createServer(async (req, res) => {
       const windSpeed = avametBundle.interpolation?.wind ?? windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
       const windGust = avametBundle.interpolation?.gust ?? windguru.gust ?? windy.gust ?? toKn(current.wind_gusts_10m);
       const windDir = avametBundle.interpolation?.dir ?? windguru.dir ?? windy.dir ?? current.wind_direction_10m ?? 0;
-      const hourly = (meteo.hourly?.time || []).slice(0, 12).map((t, i) => ({
+      const hourlyForecast = (meteo.hourly?.time || []).slice(0, 12).map((t, i) => ({
         time: new Date(t).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
         wind: toKn(meteo.hourly.wind_speed_10m?.[i]) ?? 0,
         gust: toKn(meteo.hourly.wind_gusts_10m?.[i]) ?? 0,
         dir: Number(meteo.hourly.wind_direction_10m?.[i] ?? 0),
       }));
+      const hourlyLive = hourlyFromSamples();
+      const hourly = hourlyLive.length ? hourlyLive : hourlyForecast;
       const days = (meteo.daily?.time || []).slice(0, 7);
       const forecast = days.map((d, i) => ({
         day: i === 0 ? "Hoy" : new Date(d).toLocaleDateString("es-ES", { weekday: "long" }),
@@ -893,3 +945,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => console.log(`runtime server on ${PORT}`));
+pollInterpolatedSample();
+setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
