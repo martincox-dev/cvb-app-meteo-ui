@@ -286,30 +286,48 @@ function isInTargetAemetZone(alert) {
 }
 
 async function fetchCastellonStations() {
+  if (!AEMET_API_KEY) return [];
   try {
-    const data = await fetchJson(`${WINDGURU_STATIONS_URL}?id_station=all&format=json`);
-    const stations = Array.isArray(data) ? data : Array.isArray(data?.stations) ? data.stations : [];
-    const inBox = stations
-      .filter((s) => {
-        const lat = Number(s?.lat);
-        const lon = Number(s?.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
-        // Provincia de Castellón aprox.
-        return lat >= 39.6 && lat <= 40.9 && lon >= -0.6 && lon <= 0.8;
-      })
+    const idx = await fetchJson(
+      "https://opendata.aemet.es/opendata/api/valores/climatologicos/inventarioestaciones/todasestaciones",
+      { headers: { api_key: AEMET_API_KEY } }
+    );
+    if (!idx?.datos) return [];
+    const all = await fetchJson(idx.datos);
+    const stations = Array.isArray(all) ? all : [];
+
+    const parseCoord = (raw, isLat) => {
+      if (!raw || typeof raw !== "string") return null;
+      const v = raw.trim().toUpperCase();
+      const hemi = v.slice(-1);
+      const num = v.slice(0, -1);
+      if (!/^\d+$/.test(num)) return null;
+      const degDigits = isLat ? 2 : 3;
+      const deg = Number(num.slice(0, degDigits));
+      const min = Number(num.slice(degDigits, degDigits + 2));
+      const sec = Number(num.slice(degDigits + 2, degDigits + 4));
+      let dec = deg + min / 60 + sec / 3600;
+      if (hemi === "S" || hemi === "W") dec *= -1;
+      return dec;
+    };
+
+    const castellon = stations
+      .filter((s) => String(s?.provincia || "").toUpperCase().includes("CASTELL"))
       .map((s) => ({
-        id: String(s?.id_station || s?.id || s?.name || Math.random()),
-        name: String(s?.name || s?.station || "Estación"),
-        lat: Number(s?.lat),
-        lon: Number(s?.lon),
-        wind: Number(s?.wind_avg ?? s?.wind ?? 0),
-        gust: Number(s?.wind_max ?? s?.gust ?? 0),
-        dir: Number(s?.wind_dir ?? s?.dir ?? 0),
-        temp: Number(s?.temperature ?? s?.temp ?? 0),
-        humidity: Number(s?.humidity ?? 0),
-        source: "Windguru Stations API",
-      }));
-    return inBox.slice(0, 25);
+        id: String(s?.indicativo || s?.nombre || Math.random()),
+        name: String(s?.nombre || "Estación"),
+        lat: parseCoord(s?.latitud, true),
+        lon: parseCoord(s?.longitud, false),
+        wind: null,
+        gust: null,
+        dir: null,
+        temp: null,
+        humidity: null,
+        source: "AEMET inventario estaciones",
+      }))
+      .filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lon));
+
+    return castellon.slice(0, 40);
   } catch {
     return [];
   }

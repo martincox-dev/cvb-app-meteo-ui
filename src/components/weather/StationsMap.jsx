@@ -19,11 +19,12 @@ function windColor(speed) {
 }
 
 function createWindIcon(speed, isMain) {
-  const color = windColor(speed || 0);
+  const has = Number.isFinite(speed);
+  const color = has ? windColor(speed || 0) : "#64748b";
   const size = isMain ? 44 : 36;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 44 44">
     <circle cx="22" cy="22" r="20" fill="${color}" stroke="white" stroke-width="2.5" opacity="0.92"/>
-    <text x="22" y="27" text-anchor="middle" font-size="${isMain ? 12 : 11}" font-weight="bold" fill="white" font-family="sans-serif">${Math.round(speed || 0)}</text>
+    <text x="22" y="27" text-anchor="middle" font-size="${isMain ? 12 : 11}" font-weight="bold" fill="white" font-family="sans-serif">${has ? Math.round(speed || 0) : "-"}</text>
   </svg>`;
   return L.divIcon({ html: svg, className: "", iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2] });
 }
@@ -36,7 +37,7 @@ export default function StationsMap({ stations = [] }) {
     <section>
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-space font-semibold text-foreground text-lg">Estaciones meteorológicas accesibles por API</h2>
-        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuente: Windguru Stations API</span>
+        <span className="text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full">Fuente: AEMET API (inventario)</span>
       </div>
 
       <div className="bg-white rounded-2xl shadow-card overflow-hidden">
@@ -71,22 +72,24 @@ export default function StationsMap({ stations = [] }) {
                     <div className="flex items-center gap-2 text-xs">
                       <Wind className="w-3.5 h-3.5 text-primary" />
                       <span className="text-muted-foreground">Viento:</span>
-                      <span className="font-bold" style={{ color: windColor(st.wind) }}>{Math.round(st.wind || 0)} kn</span>
+                      <span className="font-bold" style={{ color: Number.isFinite(st.wind) ? windColor(st.wind) : "#64748b" }}>
+                        {Number.isFinite(st.wind) ? `${Math.round(st.wind)} kn` : "N/D"}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
                       <Wind className="w-3.5 h-3.5 text-accent" />
                       <span className="text-muted-foreground">Racha:</span>
-                      <span className="font-semibold text-foreground">{Math.round(st.gust || 0)} kn</span>
+                      <span className="font-semibold text-foreground">{Number.isFinite(st.gust) ? `${Math.round(st.gust)} kn` : "N/D"}</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
                       <Thermometer className="w-3.5 h-3.5 text-warning" />
                       <span className="text-muted-foreground">Temp:</span>
-                      <span className="font-semibold text-foreground">{Number(st.temp || 0).toFixed(1)} °C</span>
+                      <span className="font-semibold text-foreground">{Number.isFinite(st.temp) ? `${Number(st.temp).toFixed(1)} °C` : "N/D"}</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs">
                       <Droplets className="w-3.5 h-3.5 text-sky" />
                       <span className="text-muted-foreground">Humedad:</span>
-                      <span className="font-semibold text-foreground">{Math.round(st.humidity || 0)} %</span>
+                      <span className="font-semibold text-foreground">{Number.isFinite(st.humidity) ? `${Math.round(st.humidity)} %` : "N/D"}</span>
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground mt-2 pt-2 border-t border-border/50">Fuente: {st.source || "API"}</p>
