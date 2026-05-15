@@ -512,7 +512,8 @@ const server = createServer(async (req, res) => {
           required: ["WHATSAPP_API_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"],
         });
       }
-      const [alerts] = await Promise.all([fetchAemetAlerts()]);
+      const [apiAlerts, rssAlerts] = await Promise.all([fetchAemetAlerts(), fetchAemetAlertsFromRssCap()]);
+      const alerts = apiAlerts.length ? apiAlerts : rssAlerts;
       if (!alerts.length) {
         return json(res, 404, {
           ok: false,
@@ -521,32 +522,38 @@ const server = createServer(async (req, res) => {
           target_codes: AEMET_TARGET_ZONE_CODES,
         });
       }
-      const best = [...alerts].sort((a, b) => alertRank(b.level) - alertRank(a.level))[0];
-      const bodyParams = [
-        { type: "text", text: String(best.area || "-").slice(0, 1024) },
-        { type: "text", text: String(best.levelLabel || best.level || "-").slice(0, 1024) },
-        { type: "text", text: String(best.phenomenon || "-").slice(0, 1024) },
-        { type: "text", text: String(best.description || "-").slice(0, 1024) },
-        { type: "text", text: String(best.validFrom || "-").slice(0, 1024) },
-        { type: "text", text: String(best.validTo || "-").slice(0, 1024) },
-      ];
-      const send = await sendWhatsAppTemplate({
-        to: WHATSAPP_TEST_TO || "34677025272",
-        templateName: WHATSAPP_TEMPLATE_NAME,
-        langCode: WHATSAPP_TEMPLATE_LANG,
-        components: [{ type: "body", parameters: bodyParams }],
-      });
+      const destination = WHATSAPP_TEST_TO || "34677025272";
+      const sent = [];
+      const sorted = [...alerts].sort((a, b) => alertRank(b.level) - alertRank(a.level));
+      for (const alert of sorted) {
+        const bodyParams = [
+          { type: "text", text: String(alert.area || "-").slice(0, 1024) },
+          { type: "text", text: String(alert.levelLabel || alert.level || "-").slice(0, 1024) },
+          { type: "text", text: String(alert.phenomenon || "-").slice(0, 1024) },
+          { type: "text", text: String(alert.description || "-").slice(0, 1024) },
+          { type: "text", text: String(alert.validFrom || "-").slice(0, 1024) },
+          { type: "text", text: String(alert.validTo || "-").slice(0, 1024) },
+        ];
+        const send = await sendWhatsAppTemplate({
+          to: destination,
+          templateName: WHATSAPP_TEMPLATE_NAME,
+          langCode: WHATSAPP_TEMPLATE_LANG,
+          components: [{ type: "body", parameters: bodyParams }],
+        });
+        sent.push({
+          message_id: send?.messages?.[0]?.id || null,
+          status: send?.messages?.[0]?.message_status || "accepted",
+          area: alert.area,
+          level: alert.level,
+          phenomenon: alert.phenomenon,
+          validFrom: alert.validFrom,
+          validTo: alert.validTo,
+        });
+      }
       return json(res, 200, {
         ok: true,
-        sent_alert: {
-          area: best.area,
-          level: best.level,
-          phenomenon: best.phenomenon,
-          validFrom: best.validFrom,
-          validTo: best.validTo,
-        },
-        message_id: send?.messages?.[0]?.id || null,
-        status: send?.messages?.[0]?.message_status || "accepted",
+        sent_count: sent.length,
+        sent,
       });
     }
 
