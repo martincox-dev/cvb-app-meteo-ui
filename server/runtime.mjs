@@ -33,6 +33,7 @@ const WHATSAPP_TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || "en_US";
 const WHATSAPP_TEST_TO = process.env.WHATSAPP_TEST_TO || "";
 const AVAMET_PRIMARY_IDS = ["c05m028e05", "c05m028e09"]; // Voramar + Heliópolis
 const AVAMET_AROUND_RADIUS_KM = Number(process.env.AVAMET_AROUND_RADIUS_KM || 20);
+const AVAMET_MAP_IDS = ["c05m028e05", "c05m028e09", "c05m085e03", "c05m028e07", "c05m085e04", "c05m040e19"];
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -339,7 +340,7 @@ async function fetchWindyPoint() {
 }
 
 async function fetchOpenMeteo() {
-  const meteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,relative_humidity_2m,pressure_msl,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m&daily=wind_speed_10m_max,wind_gusts_10m_max,temperature_2m_max,temperature_2m_min&timezone=Europe/Madrid&forecast_days=7`;
+  const meteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,relative_humidity_2m,pressure_msl,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m&daily=wind_speed_10m_max,wind_gusts_10m_max,temperature_2m_max,temperature_2m_min&timezone=Europe/Madrid&forecast_days=7`;
   const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${LAT}&longitude=${LON}&current=wave_height,sea_surface_temperature&hourly=wave_height,wave_period`;
   const [meteo, marine] = await Promise.all([fetchJson(meteoUrl), fetchJson(marineUrl)]);
   return { meteo, marine };
@@ -373,6 +374,24 @@ function parseVisibilityFromAemetText(text = "") {
   if (t.includes("mala")) return "Mala";
   if (t.includes("muy mala")) return "Muy mala";
   return "No especificada";
+}
+
+function visibilityFromMeters(meters) {
+  if (!Number.isFinite(meters)) return "No disponible";
+  const km = meters / 1000;
+  if (km >= 10) return "Muy buena";
+  if (km >= 5) return "Buena";
+  if (km >= 2) return "Regular";
+  return "Mala";
+}
+
+function circularMeanDeg(values = []) {
+  const vals = values.filter((v) => Number.isFinite(v));
+  if (!vals.length) return null;
+  const sin = vals.reduce((a, v) => a + Math.sin((v * Math.PI) / 180), 0) / vals.length;
+  const cos = vals.reduce((a, v) => a + Math.cos((v * Math.PI) / 180), 0) / vals.length;
+  const deg = (Math.atan2(sin, cos) * 180) / Math.PI;
+  return (deg + 360) % 360;
 }
 
 async function fetchAemetMaritimeCastellon() {
@@ -559,7 +578,7 @@ async function fetchAvametBenicasimStations() {
           name: "Estación CVB interpolada (Voramar + Heliópolis)",
           wind: avgNumeric(primary.map((s) => s.wind)),
           gust: avgNumeric(primary.map((s) => s.gust)),
-          dir: avgNumeric(primary.map((s) => s.dir)),
+          dir: circularMeanDeg(primary.map((s) => s.dir)),
           temp: avgNumeric(primary.map((s) => s.temp)),
           humidity: avgNumeric(primary.map((s) => s.humidity)),
           pressure: avgNumeric(primary.map((s) => s.pressure)),
@@ -781,11 +800,24 @@ const server = createServer(async (req, res) => {
         .slice(0, 30);
 
       const mergedAlerts = aemetAlerts.length ? aemetAlerts : aemetRssAlerts;
-      const mergedStations = [...(avametBundle.around || [])];
+      const mergedStations = (avametBundle.around || []).filter((s) => AVAMET_MAP_IDS.includes(s.id));
+      const seaTempFallback = Number(marineCurrent.sea_surface_temperature);
+      const waveFallback = Number(marineCurrent.wave_height);
+      const visibilityFallback = visibilityFromMeters(Number(current.visibility));
 
       return json(res, 200, {
         ok: true,
-        station,
+        station: {
+          ...station,
+          current: {
+            ...station.current,
+            seaTemp: station.current.seaTemp === "N/D" && Number.isFinite(seaTempFallback) ? round1(seaTempFallback) : station.current.seaTemp,
+            waveHeight: station.current.waveHeight === "N/D" && Number.isFinite(waveFallback) ? round1(waveFallback) : station.current.waveHeight,
+            visibility: (!station.current.visibility || station.current.visibility === "No especificada" || station.current.visibility === "No disponible")
+              ? visibilityFallback
+              : station.current.visibility,
+          },
+        },
         stations: mergedStations,
         aemetAlerts: mergedAlerts.length ? mergedAlerts : [{
           id: "no-alert", level: "verde", levelLabel: "Sin Avisos Activos", phenomenon: "General", area: "Litoral Castellón",

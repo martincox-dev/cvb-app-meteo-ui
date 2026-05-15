@@ -30,6 +30,20 @@ export default function CurrentConditions({ data }) {
   const { current } = data;
   const oneDec = (v) => (Number.isFinite(Number(v)) ? Number(v).toFixed(1) : v);
   const int0 = (v) => (Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : v);
+  const wind = Number(current.windSpeed);
+  const heroBg = !Number.isFinite(wind)
+    ? "#1d4ed8"
+    : wind < 5
+      ? "#38bdf8"
+      : wind < 10
+        ? "#1d4ed8"
+        : wind < 15
+          ? "#16a34a"
+          : wind < 20
+            ? "#eab308"
+            : wind < 25
+              ? "#dc2626"
+              : "#7c3aed";
 
   return (
     <section>
@@ -41,7 +55,7 @@ export default function CurrentConditions({ data }) {
       </div>
 
       {/* Hero wind card */}
-      <div className="bg-gradient-to-br from-primary to-ocean rounded-2xl shadow-card p-6 mb-4 text-white relative overflow-hidden">
+      <div className="rounded-2xl shadow-card p-6 mb-4 text-white relative overflow-hidden" style={{ backgroundColor: heroBg }}>
         <div className="absolute inset-0 opacity-10">
           <div className="absolute top-4 right-8 w-32 h-32 rounded-full border-2 border-white" />
           <div className="absolute top-8 right-12 w-20 h-20 rounded-full border-2 border-white" />
