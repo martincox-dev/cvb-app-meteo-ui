@@ -129,7 +129,7 @@ function parseCapXmlToAlerts(xml) {
   return alerts;
 }
 
-async function fetchAemetAlertsFromRssCap() {
+async function fetchAemetAlertsFromRssCap(filtered = true) {
   const allAlerts = [];
   for (const rssUrl of AEMET_RSS_FEEDS) {
     try {
@@ -147,7 +147,7 @@ async function fetchAemetAlertsFromRssCap() {
       // ignore per feed and continue
     }
   }
-  return allAlerts.filter((a) => isInTargetAemetZone(a));
+  return filtered ? allAlerts.filter((a) => isInTargetAemetZone(a)) : allAlerts;
 }
 
 async function parseBody(req) {
@@ -554,6 +554,52 @@ const server = createServer(async (req, res) => {
         ok: true,
         sent_count: sent.length,
         sent,
+      });
+    }
+
+    if (url.pathname === "/api/whatsapp/force-test") {
+      if (!WHATSAPP_API_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+        return json(res, 400, {
+          ok: false,
+          error: "missing_whatsapp_config",
+          required: ["WHATSAPP_API_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"],
+        });
+      }
+      const destination = WHATSAPP_TEST_TO || "34677025272";
+      const [archiveRaw, rssAll] = await Promise.all([fetchAemetAlertsArchive(5), fetchAemetAlertsFromRssCap(false)]);
+      const archiveAlerts = archiveRaw.map((a, i) => mapAemetAlertRaw(a, i));
+      const candidates = [...archiveAlerts, ...rssAll];
+      if (!candidates.length) {
+        return json(res, 404, { ok: false, error: "no_aemet_alerts_available" });
+      }
+      const selected = [...candidates].sort((a, b) => alertRank(b.level) - alertRank(a.level))[0];
+      const bodyParams = [
+        { type: "text", text: String(selected.area || "-").slice(0, 1024) },
+        { type: "text", text: String(selected.levelLabel || selected.level || "-").slice(0, 1024) },
+        { type: "text", text: String(selected.phenomenon || "-").slice(0, 1024) },
+        { type: "text", text: String(selected.description || "-").slice(0, 1024) },
+        { type: "text", text: String(selected.validFrom || "-").slice(0, 1024) },
+        { type: "text", text: String(selected.validTo || "-").slice(0, 1024) },
+      ];
+      const send = await sendWhatsAppTemplate({
+        to: destination,
+        templateName: WHATSAPP_TEMPLATE_NAME,
+        langCode: WHATSAPP_TEMPLATE_LANG,
+        components: [{ type: "body", parameters: bodyParams }],
+      });
+      return json(res, 200, {
+        ok: true,
+        forced: true,
+        message_id: send?.messages?.[0]?.id || null,
+        status: send?.messages?.[0]?.message_status || "accepted",
+        sent_alert: {
+          area: selected.area,
+          level: selected.level,
+          phenomenon: selected.phenomenon,
+          validFrom: selected.validFrom,
+          validTo: selected.validTo,
+          source: selected.source || "AEMET",
+        },
       });
     }
 
