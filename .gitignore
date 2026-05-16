@@ -28,3 +28,6 @@ dist-ssr
 
 .env
 .vite
+whatsapp-groups.local
+.wwebjs_auth
+.wwebjs_cache

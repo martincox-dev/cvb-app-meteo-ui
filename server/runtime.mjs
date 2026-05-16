@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { spawn } from "node:child_process";
 
 const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
@@ -36,6 +37,10 @@ const AVAMET_AROUND_RADIUS_KM = Number(process.env.AVAMET_AROUND_RADIUS_KM || 20
 const AVAMET_MAP_IDS = ["c05m028e05", "c05m028e09", "c05m085e03", "c05m028e07", "c05m085e04", "c05m040e19"];
 const AEMET_PLAYA_ID = "1202802"; // fijo Benicàssim
 const AEMET_VIS_STATION_ID = "8500A"; // Castellón-Almassora
+const WA_AUTO_SEND_ENABLED = String(process.env.WA_AUTO_SEND_ENABLED || "true").toLowerCase() === "true";
+const WA_AUTO_SEND_INTERVAL_MS = Math.max(60000, Number(process.env.WA_AUTO_SEND_INTERVAL_MS || 180000));
+const WA_CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
+const WA_GROUP_IDS = process.env.WA_GROUP_IDS || "";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -43,6 +48,9 @@ const SAMPLE_RETENTION_MS = 31 * 24 * 60 * 60 * 1000;
 const SAMPLE_INTERVAL_MS = 2 * 60 * 1000;
 let LAST_AVAMET_BUNDLE = { around: [], primary: [], interpolation: null };
 let INTERPOLATED_SAMPLES = [];
+let AUTO_SEND_RUNNING = false;
+const SENT_ALERT_KEYS_FILE = join(root, "server", "sent-alert-keys.json");
+let SENT_ALERT_KEYS = new Set();
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
 const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
@@ -703,6 +711,100 @@ function alertRank(level) {
   return 1;
 }
 
+function alertFingerprint(alert) {
+  const area = String(alert?.area || "").trim().toLowerCase();
+  const phenomenon = String(alert?.phenomenon || "").trim().toLowerCase();
+  const level = String(alert?.level || "").trim().toLowerCase();
+  const from = String(alert?.validFrom || "").trim();
+  const to = String(alert?.validTo || "").trim();
+  return `${area}__${phenomenon}__${level}__${from}__${to}`;
+}
+
+function formatAlertWhatsappText(alert) {
+  return [
+    "⚠️ Aviso meteorológico AEMET",
+    `📍 Ámbito: ${String(alert.area || "-")}`,
+    `🚨 Nivel: ${String(alert.levelLabel || alert.level || "-")} · ${String(alert.phenomenon || "-")}`,
+    `📝 ${String(alert.description || "Aviso oficial de AEMET")}`,
+    `🕒 Franja: ${String(alert.validFrom || "-")} -> ${String(alert.validTo || "-")}`,
+    "",
+    "🔗 Portal meteo CVB:",
+    "https://meteo.cvbenicasim.com",
+  ].join("\n");
+}
+
+async function loadSentAlertKeys() {
+  try {
+    if (!existsSync(SENT_ALERT_KEYS_FILE)) return;
+    const txt = await readFile(SENT_ALERT_KEYS_FILE, "utf8");
+    const arr = JSON.parse(txt);
+    if (Array.isArray(arr)) SENT_ALERT_KEYS = new Set(arr.filter(Boolean));
+  } catch {
+    SENT_ALERT_KEYS = new Set();
+  }
+}
+
+async function saveSentAlertKeys() {
+  try {
+    const all = [...SENT_ALERT_KEYS];
+    const kept = all.slice(-500);
+    await writeFile(SENT_ALERT_KEYS_FILE, JSON.stringify(kept, null, 2), "utf8");
+  } catch {
+    // ignore
+  }
+}
+
+async function sendAlertToConfiguredGroups(text) {
+  const env = {
+    ...process.env,
+    WA_CLIENT_ID,
+    WA_GROUP_IDS,
+    WA_ALERT_MESSAGE: text,
+  };
+  await new Promise((resolve, reject) => {
+    const child = spawn("npm", ["run", "wa:send:groups"], {
+      cwd: root,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stdout.on("data", (d) => process.stdout.write(String(d)));
+    child.stderr.on("data", (d) => {
+      stderr += String(d);
+      process.stderr.write(String(d));
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr || `wa:send:groups exit ${code}`));
+    });
+  });
+}
+
+async function autoDispatchAemetAlertsToGroups() {
+  if (!WA_AUTO_SEND_ENABLED || AUTO_SEND_RUNNING) return;
+  AUTO_SEND_RUNNING = true;
+  try {
+    const [apiAlerts, rssAlerts] = await Promise.all([fetchAemetAlerts(), fetchAemetAlertsFromRssCap()]);
+    const alerts = (apiAlerts.length ? apiAlerts : rssAlerts)
+      .sort((a, b) => alertRank(b.level) - alertRank(a.level));
+    if (!alerts.length) return;
+
+    for (const alert of alerts) {
+      const fp = alertFingerprint(alert);
+      if (SENT_ALERT_KEYS.has(fp)) continue;
+      const text = formatAlertWhatsappText(alert);
+      await sendAlertToConfiguredGroups(text);
+      SENT_ALERT_KEYS.add(fp);
+      await saveSentAlertKeys();
+    }
+  } catch (err) {
+    console.error("autoDispatchAemetAlertsToGroups error:", err?.message || err);
+  } finally {
+    AUTO_SEND_RUNNING = false;
+  }
+}
+
 const server = createServer(async (req, res) => {
   try {
     if (!req.url) return json(res, 400, { ok: false, error: "bad request" });
@@ -947,3 +1049,5 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, () => console.log(`runtime server on ${PORT}`));
 pollInterpolatedSample();
 setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
+loadSentAlertKeys().then(() => autoDispatchAemetAlertsToGroups());
+setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
