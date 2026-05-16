@@ -1,6 +1,7 @@
 import pkg from "whatsapp-web.js";
 import fs from "node:fs";
 import { readFileSync } from "node:fs";
+import { restoreWaSessionFromStorage, backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
 const { Client, LocalAuth } = pkg;
 
@@ -45,6 +46,7 @@ const client = new Client({
 });
 
 console.log(`Arrancando envío a ${GROUP_IDS.length} grupos (clientId=${CLIENT_ID}, headless=${HEADLESS})`);
+const rootDir = process.cwd();
 
 client.on("qr", () => {
   console.error("Se requiere QR en esta sesión. Vincula primero con list-cvb-group/wa:test.");
@@ -77,6 +79,11 @@ client.on("ready", async () => {
       console.error("Algunos envíos no alcanzaron ack>=1", failed);
       process.exit(2);
     }
+    try {
+      await backupWaSessionToStorage(rootDir);
+    } catch (e) {
+      console.error("backup sesión WA warning:", e?.message || e);
+    }
     process.exit(0);
   } catch (err) {
     console.error("Error envío grupos:", err?.message || err);
@@ -84,4 +91,9 @@ client.on("ready", async () => {
   }
 });
 
+try {
+  await restoreWaSessionFromStorage(rootDir);
+} catch (e) {
+  console.error("restore sesión WA warning:", e?.message || e);
+}
 client.initialize();

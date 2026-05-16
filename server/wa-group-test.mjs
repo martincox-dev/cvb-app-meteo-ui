@@ -1,5 +1,6 @@
 import pkg from "whatsapp-web.js";
 import qrcode from "qrcode-terminal";
+import { restoreWaSessionFromStorage, backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
 const { Client, LocalAuth } = pkg;
 
@@ -20,6 +21,7 @@ const client = new Client({
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
+const rootDir = process.cwd();
 
 console.log(`Arrancando WhatsApp test con clientId=${CLIENT_ID}, headless=${HEADLESS}`);
 
@@ -59,6 +61,11 @@ client.on("ready", async () => {
     }
 
     console.log(`Mensaje enviado al grupo ${GROUP_ID} (ack=${deliveredAck})`);
+    try {
+      await backupWaSessionToStorage(rootDir);
+    } catch (e) {
+      console.error("backup sesión WA warning:", e?.message || e);
+    }
     process.exit(0);
   } catch (err) {
     console.error("Error enviando mensaje:", err?.message || err);
@@ -75,4 +82,9 @@ client.on("disconnected", (reason) => {
   console.error("Cliente desconectado:", reason);
 });
 
+try {
+  await restoreWaSessionFromStorage(rootDir);
+} catch (e) {
+  console.error("restore sesión WA warning:", e?.message || e);
+}
 client.initialize();

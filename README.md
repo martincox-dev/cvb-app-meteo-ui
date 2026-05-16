@@ -33,6 +33,7 @@ Archivos relevantes:
 - `server/sent-alert-keys.json` (histórico de huellas ya enviadas)
 - `whatsapp-groups.local` (IDs de grupos; local, no versionado)
 - `.wwebjs_auth/` (sesión de WhatsApp; local/persistente, no versionado)
+- `server/wa-session-storage.mjs` (backup/restore de sesión WA en Bunny Storage)
 
 Variables importantes:
 - `WA_AUTO_SEND_ENABLED=true`
@@ -40,12 +41,21 @@ Variables importantes:
 - `WA_CLIENT_ID=cvb-group-list-temp`
 - `WA_GROUP_IDS` (opcional; si no existe usa `whatsapp-groups.local`)
 - `LIBSQL_URL` y `LIBSQL_AUTH_TOKEN` (BunnyDB/libSQL para histórico persistente)
+- `BUNNY_STORAGE_ZONE` y `BUNNY_STORAGE_PASSWORD` (backup/restore sesión WA)
+- `BUNNY_WA_SESSION_OBJECT` (objeto remoto, por defecto `state/wa-session.tgz`)
 
 Qué tienes que hacer:
 1. Mantener la sesión vinculada de WhatsApp activa en el dispositivo.
-2. Mantener persistente `.wwebjs_auth` en el entorno donde corra producción.
+2. Configurar Bunny Storage para sesión WA (`BUNNY_STORAGE_ZONE`/`BUNNY_STORAGE_PASSWORD`).
 3. No borrar `server/sent-alert-keys.json` salvo que quieras permitir reenvío histórico.
 4. Tras cambios de código: redeploy/restart de `cvb-meteo-portal`.
+
+Nota importante sobre Magic Containers:
+- No asumas que el contenedor conservará siempre su filesystem local.
+- Aunque normalmente puede reutilizar estado entre reinicios, en recreaciones/migraciones/deploys puede arrancar limpio.
+- Si eso ocurre, `.wwebjs_auth` se pierde y WhatsApp pedirá QR de nuevo.
+- Con Bunny Storage configurado, el runtime restaura y respalda automáticamente `.wwebjs_auth`.
+- Operativamente: si un día dejan de salir alertas al grupo, primero comprobar sesión WhatsApp y relink QR.
 
 Qué debes evitar:
 - No borrar `.wwebjs_auth` (forzará QR de nuevo).

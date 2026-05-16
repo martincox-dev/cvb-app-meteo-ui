@@ -1,5 +1,6 @@
 import pkg from "whatsapp-web.js";
 import qrcode from "qrcode-terminal";
+import { restoreWaSessionFromStorage, backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
 const { Client, LocalAuth } = pkg;
 
@@ -12,6 +13,7 @@ const client = new Client({
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
+const rootDir = process.cwd();
 
 console.log(`Buscando grupos que contengan: "${SEARCH}"`);
 
@@ -45,6 +47,11 @@ client.on("ready", async () => {
         console.log(`${c.isGroup ? "GROUP" : "CHAT"} | ${c.name} -> ${c.id?._serialized}`);
       }
     }
+    try {
+      await backupWaSessionToStorage(rootDir);
+    } catch (e) {
+      console.error("backup sesión WA warning:", e?.message || e);
+    }
     await client.destroy();
     process.exit(0);
   } catch (err) {
@@ -53,4 +60,9 @@ client.on("ready", async () => {
   }
 });
 
+try {
+  await restoreWaSessionFromStorage(rootDir);
+} catch (e) {
+  console.error("restore sesión WA warning:", e?.message || e);
+}
 client.initialize();
