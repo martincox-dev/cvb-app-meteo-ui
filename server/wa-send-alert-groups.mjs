@@ -96,7 +96,8 @@ client.on("ready", async () => {
 });
 
 try {
-  await restoreWaSessionFromStorage(rootDir);
+  const restored = await restoreWaSessionFromStorage(rootDir);
+  console.log("restore WA session:", JSON.stringify(restored));
 } catch (e) {
   console.error("restore sesión WA warning:", e?.message || e);
 }
