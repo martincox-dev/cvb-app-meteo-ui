@@ -19,7 +19,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 export default function HourlyChart({ hourly }) {
   return (
     <div className="bg-white rounded-2xl shadow-card p-5">
-      <h3 className="font-space font-semibold text-foreground mb-4">Viento Horario — Hoy</h3>
+      <h3 className="font-space font-semibold text-foreground mb-4">Viento Horario — Últimas 24h</h3>
       <ResponsiveContainer width="100%" height={180}>
         <ComposedChart data={hourly} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
           <defs>

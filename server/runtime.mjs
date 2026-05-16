@@ -969,7 +969,7 @@ const server = createServer(async (req, res) => {
         dir: Number(meteo.hourly.wind_direction_10m?.[i] ?? 0),
       }));
       const hourlyLive = hourlyFromSamples();
-      const hourly = hourlyLive.length ? hourlyLive : hourlyForecast;
+      const hourly = hourlyLive.length >= 6 ? hourlyLive : hourlyForecast;
       const days = (meteo.daily?.time || []).slice(0, 7);
       const forecast = days.map((d, i) => ({
         day: i === 0 ? "Hoy" : new Date(d).toLocaleDateString("es-ES", { weekday: "long" }),
