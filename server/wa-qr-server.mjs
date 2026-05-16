@@ -1,5 +1,6 @@
 import pkg from "whatsapp-web.js";
 import { writeFile, unlink } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { restoreWaSessionFromStorage, backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
 const { Client, LocalAuth } = pkg;
@@ -57,5 +58,9 @@ try {
 } catch (e) {
   console.error("restore warning:", e?.message || e);
 }
+
+try {
+  rmSync(`${process.cwd()}/.wwebjs_auth/session-${CLIENT_ID}/SingletonLock`);
+} catch {}
 
 client.initialize();

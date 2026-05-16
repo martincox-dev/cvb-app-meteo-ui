@@ -100,4 +100,10 @@ try {
 } catch (e) {
   console.error("restore sesión WA warning:", e?.message || e);
 }
+
+// Remove stale SingletonLock left by a previous Chromium process
+try {
+  fs.rmSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}/SingletonLock`);
+} catch {}
+
 client.initialize();
