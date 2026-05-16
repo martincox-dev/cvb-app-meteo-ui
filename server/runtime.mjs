@@ -841,11 +841,12 @@ async function saveSentAlertKeys() {
   }
 }
 
-async function sendAlertToConfiguredGroups(text) {
+async function sendAlertToGroups(groupIds, text) {
+  const ids = Array.isArray(groupIds) ? groupIds.join(",") : groupIds;
   const env = {
     ...process.env,
     WA_CLIENT_ID,
-    WA_GROUP_IDS,
+    WA_GROUP_IDS: ids,
     WA_ALERT_MESSAGE: text,
   };
   await new Promise((resolve, reject) => {
@@ -866,6 +867,10 @@ async function sendAlertToConfiguredGroups(text) {
       else reject(new Error(stderr || `wa:send:groups exit ${code}`));
     });
   });
+}
+
+async function sendAlertToConfiguredGroups(text) {
+  await sendAlertToGroups(WA_GROUP_IDS, text);
 }
 
 async function autoDispatchAemetAlertsToGroups() {
@@ -1048,6 +1053,19 @@ const server = createServer(async (req, res) => {
           source: selected.source || "AEMET",
         },
       });
+    }
+
+    if (url.pathname === "/api/whatsapp/wa-test") {
+      const juntaId = WA_GROUP_IDS.split(",")[0].trim();
+      if (!juntaId) {
+        return json(res, 400, { ok: false, error: "WA_GROUP_IDS no configurado" });
+      }
+      try {
+        await sendAlertToGroups(juntaId, "🧪 Prueba técnica meteo CVB — sistema OK");
+        return json(res, 200, { ok: true, sent_to: juntaId });
+      } catch (err) {
+        return json(res, 500, { ok: false, error: String(err?.message || err) });
+      }
     }
 
     if (url.pathname === "/api/meteo") {
