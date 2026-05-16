@@ -10,7 +10,7 @@
     "wa:test": "node server/wa-group-test.mjs",
     "wa:send:groups": "node server/wa-send-alert-groups.mjs",
     "build": "vite build",
-    "start": "NODE_ENV=production node server/index.mjs",
+    "start": "NODE_ENV=production node server/runtime.mjs",
     "lint": "eslint . --quiet",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -p ./jsconfig.json",

@@ -23,10 +23,10 @@
       "entryPoint": {
         "command": "/bin/sh",
         "commandArray": ["/bin/sh"],
-        "arguments": "-c apk add --no-cache git && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && node server/runtime.mjs",
+        "arguments": "-c apk add --no-cache git chromium && export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true && export PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && npm ci --omit=dev && node server/runtime.mjs",
         "argumentsArray": [
           "-c",
-          "apk add --no-cache git && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && node server/runtime.mjs"
+          "apk add --no-cache git chromium && export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true && export PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser && rm -rf /srv/app && git clone --depth=1 https://github.com/martincox-dev/cvb-app-meteo-ui.git /srv/app && cd /srv/app && npm ci --omit=dev && node server/runtime.mjs"
         ],
         "workingDirectory": "/"
       },
