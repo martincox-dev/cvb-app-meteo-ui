@@ -39,6 +39,7 @@ Variables importantes:
 - `WA_AUTO_SEND_INTERVAL_MS=180000` (3 min)
 - `WA_CLIENT_ID=cvb-group-list-temp`
 - `WA_GROUP_IDS` (opcional; si no existe usa `whatsapp-groups.local`)
+- `LIBSQL_URL` y `LIBSQL_AUTH_TOKEN` (BunnyDB/libSQL para histórico persistente)
 
 Qué tienes que hacer:
 1. Mantener la sesión vinculada de WhatsApp activa en el dispositivo.
@@ -56,3 +57,5 @@ Qué debes evitar:
 Estado actual:
 - Muestra las últimas 24 horas reales de muestras interpoladas AVAMET.
 - Etiqueta en hora local del servidor (Europe/Madrid en Bunny Madrid).
+- Las muestras se guardan en BunnyDB con retención de 30 días.
+- Si BunnyDB no está configurada, usa memoria del proceso (no persistente).

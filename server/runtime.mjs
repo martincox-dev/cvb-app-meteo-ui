@@ -5,6 +5,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { spawn } from "node:child_process";
+import { createClient } from "@libsql/client";
 
 const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
@@ -41,6 +42,8 @@ const WA_AUTO_SEND_ENABLED = String(process.env.WA_AUTO_SEND_ENABLED || "true").
 const WA_AUTO_SEND_INTERVAL_MS = Math.max(60000, Number(process.env.WA_AUTO_SEND_INTERVAL_MS || 180000));
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const WA_GROUP_IDS = process.env.WA_GROUP_IDS || "";
+const LIBSQL_URL = process.env.LIBSQL_URL || "";
+const LIBSQL_AUTH_TOKEN = process.env.LIBSQL_AUTH_TOKEN || "";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -51,6 +54,9 @@ let INTERPOLATED_SAMPLES = [];
 let AUTO_SEND_RUNNING = false;
 const SENT_ALERT_KEYS_FILE = join(root, "server", "sent-alert-keys.json");
 let SENT_ALERT_KEYS = new Set();
+const db = LIBSQL_URL && LIBSQL_AUTH_TOKEN
+  ? createClient({ url: LIBSQL_URL, authToken: LIBSQL_AUTH_TOKEN })
+  : null;
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
 const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
@@ -106,6 +112,34 @@ async function fetchText(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.text();
+}
+
+async function initDb() {
+  if (!db) return;
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS wind_samples (
+      ts INTEGER PRIMARY KEY,
+      wind REAL,
+      gust REAL,
+      dir REAL,
+      temp REAL,
+      humidity INTEGER,
+      pressure INTEGER
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS alert_dispatches (
+      alert_key TEXT PRIMARY KEY,
+      sent_at INTEGER NOT NULL,
+      area TEXT,
+      level TEXT,
+      phenomenon TEXT,
+      valid_from TEXT,
+      valid_to TEXT
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_wind_samples_ts ON wind_samples(ts)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_dispatches_sent_at ON alert_dispatches(sent_at)");
 }
 
 function getTag(xml, tag) {
@@ -677,12 +711,53 @@ async function pollInterpolatedSample() {
     });
     const cutoff = now - SAMPLE_RETENTION_MS;
     INTERPOLATED_SAMPLES = INTERPOLATED_SAMPLES.filter((s) => s.ts >= cutoff);
+    if (db) {
+      await db.execute({
+        sql: `INSERT OR REPLACE INTO wind_samples (ts, wind, gust, dir, temp, humidity, pressure) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [now, round1(i.wind), round1(i.gust), round1(i.dir), round1(i.temp), Number.isFinite(i.humidity) ? Math.round(i.humidity) : null, Number.isFinite(i.pressure) ? Math.round(i.pressure) : null],
+      });
+      await db.execute({
+        sql: `DELETE FROM wind_samples WHERE ts < ?`,
+        args: [cutoff],
+      });
+    }
   } catch {
     // ignore polling errors
   }
 }
 
-function hourlyFromSamples() {
+async function hourlyFromSamples() {
+  if (db) {
+    const now = Date.now();
+    const start = now - (24 * 60 * 60 * 1000);
+    const rowsRes = await db.execute({
+      sql: `SELECT ts, wind, gust, dir FROM wind_samples WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`,
+      args: [start, now],
+    });
+    const rows = rowsRes.rows || [];
+    if (!rows.length) return [];
+    const byHour = new Map();
+    for (const r of rows) {
+      const d = new Date(Number(r.ts));
+      const hourKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}`;
+      if (!byHour.has(hourKey)) byHour.set(hourKey, []);
+      byHour.get(hourKey).push({
+        wind: Number(r.wind),
+        gust: Number(r.gust),
+        dir: Number(r.dir),
+      });
+    }
+    return [...byHour.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .slice(-24)
+      .map(([hourKey, list]) => ({
+        time: `${hourKey.slice(11, 13)}:00`,
+        wind: round1(avgNumeric(list.map((x) => x.wind)) ?? 0),
+        gust: round1(Math.max(...list.map((x) => Number(x.gust || 0))) || 0),
+        dir: round1(circularMeanDeg(list.map((x) => x.dir)) ?? 0),
+      }));
+  }
+
   const now = Date.now();
   const start = now - (24 * 60 * 60 * 1000);
   const windowSamples = INTERPOLATED_SAMPLES.filter((s) => s.ts >= start && s.ts <= now);
@@ -735,6 +810,16 @@ function formatAlertWhatsappText(alert) {
 }
 
 async function loadSentAlertKeys() {
+  if (db) {
+    try {
+      const rowsRes = await db.execute("SELECT alert_key FROM alert_dispatches ORDER BY sent_at ASC LIMIT 5000");
+      const keys = (rowsRes.rows || []).map((r) => String(r.alert_key)).filter(Boolean);
+      SENT_ALERT_KEYS = new Set(keys);
+      return;
+    } catch {
+      SENT_ALERT_KEYS = new Set();
+    }
+  }
   try {
     if (!existsSync(SENT_ALERT_KEYS_FILE)) return;
     const txt = await readFile(SENT_ALERT_KEYS_FILE, "utf8");
@@ -746,6 +831,7 @@ async function loadSentAlertKeys() {
 }
 
 async function saveSentAlertKeys() {
+  if (db) return;
   try {
     const all = [...SENT_ALERT_KEYS];
     const kept = all.slice(-500);
@@ -797,6 +883,24 @@ async function autoDispatchAemetAlertsToGroups() {
       const text = formatAlertWhatsappText(alert);
       await sendAlertToConfiguredGroups(text);
       SENT_ALERT_KEYS.add(fp);
+      if (db) {
+        await db.execute({
+          sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            fp,
+            Date.now(),
+            String(alert.area || ""),
+            String(alert.level || ""),
+            String(alert.phenomenon || ""),
+            String(alert.validFrom || ""),
+            String(alert.validTo || ""),
+          ],
+        });
+        await db.execute({
+          sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
+          args: [Date.now() - SAMPLE_RETENTION_MS],
+        });
+      }
       await saveSentAlertKeys();
     }
   } catch (err) {
@@ -968,7 +1072,7 @@ const server = createServer(async (req, res) => {
         gust: toKn(meteo.hourly.wind_gusts_10m?.[i]) ?? 0,
         dir: Number(meteo.hourly.wind_direction_10m?.[i] ?? 0),
       }));
-      const hourlyLive = hourlyFromSamples();
+      const hourlyLive = await hourlyFromSamples();
       const hourly = hourlyLive.length >= 6 ? hourlyLive : hourlyForecast;
       const days = (meteo.daily?.time || []).slice(0, 7);
       const forecast = days.map((d, i) => ({
@@ -1048,7 +1152,10 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => console.log(`runtime server on ${PORT}`));
+initDb()
+  .then(() => loadSentAlertKeys())
+  .then(() => autoDispatchAemetAlertsToGroups())
+  .catch((err) => console.error("init startup error:", err?.message || err));
 pollInterpolatedSample();
 setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
-loadSentAlertKeys().then(() => autoDispatchAemetAlertsToGroups());
 setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
