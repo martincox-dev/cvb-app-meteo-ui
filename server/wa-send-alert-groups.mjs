@@ -42,7 +42,11 @@ if (!MESSAGE) {
 
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: CLIENT_ID }),
-  puppeteer: { headless: HEADLESS, args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+  puppeteer: {
+    headless: HEADLESS,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+  },
 });
 
 console.log(`Arrancando envío a ${GROUP_IDS.length} grupos (clientId=${CLIENT_ID}, headless=${HEADLESS})`);
