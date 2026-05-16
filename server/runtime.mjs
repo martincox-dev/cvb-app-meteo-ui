@@ -1060,12 +1060,11 @@ const server = createServer(async (req, res) => {
       if (!juntaId) {
         return json(res, 400, { ok: false, error: "WA_GROUP_IDS no configurado" });
       }
-      try {
-        await sendAlertToGroups(juntaId, "🧪 Prueba técnica meteo CVB — sistema OK");
-        return json(res, 200, { ok: true, sent_to: juntaId });
-      } catch (err) {
-        return json(res, 500, { ok: false, error: String(err?.message || err) });
-      }
+      json(res, 202, { ok: true, status: "sending", sent_to: juntaId });
+      sendAlertToGroups(juntaId, "🧪 Prueba técnica meteo CVB — sistema OK")
+        .then(() => console.log(`wa-test OK -> ${juntaId}`))
+        .catch((err) => console.error(`wa-test ERROR: ${err?.message || err}`));
+      return;
     }
 
     if (url.pathname === "/api/meteo") {
