@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1053,6 +1053,43 @@ const server = createServer(async (req, res) => {
           source: selected.source || "AEMET",
         },
       });
+    }
+
+    if (url.pathname === "/api/whatsapp/start-qr") {
+      const qrFile = "/tmp/wa-pending-qr.txt";
+      try { await unlink(qrFile); } catch {}
+      const env = { ...process.env, WA_CLIENT_ID, WA_QR_FILE: qrFile };
+      const proc = spawn("node", ["server/wa-qr-server.mjs"], {
+        cwd: root, env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      proc.stdout.on("data", (d) => process.stdout.write(String(d)));
+      proc.stderr.on("data", (d) => process.stderr.write(String(d)));
+      return json(res, 202, { ok: true, status: "qr_process_started", scan_url: "/api/whatsapp/qr" });
+    }
+
+    if (url.pathname === "/api/whatsapp/qr") {
+      const qrFile = "/tmp/wa-pending-qr.txt";
+      const qrString = existsSync(qrFile)
+        ? await readFile(qrFile, "utf8").catch(() => null)
+        : null;
+      const html = `<!DOCTYPE html>
+<html><head>
+<title>CVB WhatsApp QR</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="3">
+<style>body{font-family:sans-serif;text-align:center;padding:20px;background:#111;color:#fff}h2{margin-bottom:20px}#qr{display:inline-block;background:#fff;padding:16px;border-radius:8px}</style>
+</head><body>
+${qrString
+  ? `<h2>Escanea con WhatsApp → Dispositivos vinculados</h2>
+<div id="qr"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>new QRCode(document.getElementById('qr'),{text:${JSON.stringify(qrString)},width:280,height:280,colorDark:'#000',colorLight:'#fff'})</script>
+<p>Página se actualiza cada 3s. Cuando escanees desaparecerá el QR.</p>`
+  : `<h2>Sin QR pendiente</h2><p>Llama a <code>POST /api/whatsapp/start-qr</code> primero,<br>o la sesión ya está vinculada.</p>`}
+</body></html>`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
     }
 
     if (url.pathname === "/api/whatsapp/wa-test") {
