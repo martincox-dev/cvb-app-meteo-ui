@@ -726,6 +726,16 @@ async function pollInterpolatedSample() {
   }
 }
 
+const _madridHourFmt = new Intl.DateTimeFormat("sv", {
+  timeZone: "Europe/Madrid",
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
+});
+function madridHourKey(ts) {
+  const parts = _madridHourFmt.formatToParts(new Date(ts));
+  const g = (t) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}`;
+}
+
 async function hourlyFromSamples() {
   if (db) {
     const now = Date.now();
@@ -738,8 +748,7 @@ async function hourlyFromSamples() {
     if (!rows.length) return [];
     const byHour = new Map();
     for (const r of rows) {
-      const d = new Date(Number(r.ts));
-      const hourKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}`;
+      const hourKey = madridHourKey(Number(r.ts));
       if (!byHour.has(hourKey)) byHour.set(hourKey, []);
       byHour.get(hourKey).push({
         wind: Number(r.wind),
@@ -764,8 +773,7 @@ async function hourlyFromSamples() {
   if (!windowSamples.length) return [];
   const byHour = new Map();
   for (const s of windowSamples) {
-    const d = new Date(s.ts);
-    const hourKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}`;
+    const hourKey = madridHourKey(s.ts);
     if (!byHour.has(hourKey)) byHour.set(hourKey, []);
     byHour.get(hourKey).push(s);
   }
