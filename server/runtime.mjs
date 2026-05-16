@@ -683,21 +683,22 @@ async function pollInterpolatedSample() {
 }
 
 function hourlyFromSamples() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const today = INTERPOLATED_SAMPLES.filter((s) => s.ts >= start);
-  if (!today.length) return [];
+  const now = Date.now();
+  const start = now - (24 * 60 * 60 * 1000);
+  const windowSamples = INTERPOLATED_SAMPLES.filter((s) => s.ts >= start && s.ts <= now);
+  if (!windowSamples.length) return [];
   const byHour = new Map();
-  for (const s of today) {
-    const h = new Date(s.ts).getHours();
-    if (!byHour.has(h)) byHour.set(h, []);
-    byHour.get(h).push(s);
+  for (const s of windowSamples) {
+    const d = new Date(s.ts);
+    const hourKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}`;
+    if (!byHour.has(hourKey)) byHour.set(hourKey, []);
+    byHour.get(hourKey).push(s);
   }
   return [...byHour.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .slice(-12)
-    .map(([h, list]) => ({
-      time: `${String(h).padStart(2, "0")}:00`,
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-24)
+    .map(([hourKey, list]) => ({
+      time: `${hourKey.slice(11, 13)}:00`,
       wind: round1(avgNumeric(list.map((x) => x.wind)) ?? 0),
       gust: round1(Math.max(...list.map((x) => Number(x.gust || 0))) || 0),
       dir: round1(circularMeanDeg(list.map((x) => x.dir)) ?? 0),
