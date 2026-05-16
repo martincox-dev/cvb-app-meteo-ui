@@ -38,6 +38,7 @@ client.on("ready", async () => {
     console.error("Error backup sesión:", e?.message || e);
   }
   try { await unlink(QR_FILE); } catch {}
+  try { await client.destroy(); } catch {}
   process.exit(0);
 });
 
