@@ -44,6 +44,9 @@ const WA_CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const WA_GROUP_IDS = process.env.WA_GROUP_IDS || "";
 const LIBSQL_URL = process.env.LIBSQL_URL || "";
 const LIBSQL_AUTH_TOKEN = process.env.LIBSQL_AUTH_TOKEN || "";
+const BUNNY_STORAGE_HOST = process.env.BUNNY_STORAGE_HOST || "storage.bunnycdn.com";
+const BUNNY_STORAGE_ZONE = process.env.BUNNY_STORAGE_ZONE || "";
+const BUNNY_STORAGE_PASSWORD = process.env.BUNNY_STORAGE_PASSWORD || "";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
@@ -1204,6 +1207,63 @@ ${qrString
         }],
         aemetHistory: aemetHistory.length ? aemetHistory : (mergedAlerts || []),
         aemetMaritime,
+      });
+    }
+
+    if (url.pathname === "/api/status") {
+      const checks = await Promise.all([
+        // AVAMET
+        fetchAvametBenicasimStations()
+          .then((b) => ({ name: "avamet", ok: !!(b?.around?.length), detail: `${b?.around?.length ?? 0} estaciones` }))
+          .catch((e) => ({ name: "avamet", ok: false, detail: e?.message })),
+        // AEMET RSS (sin API key)
+        fetchAemetAlertsFromRssCap(false)
+          .then((a) => ({ name: "aemet_rss", ok: true, detail: `${a.length} alertas en feeds` }))
+          .catch((e) => ({ name: "aemet_rss", ok: false, detail: e?.message })),
+        // AEMET API key
+        AEMET_API_KEY
+          ? fetch(`https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/va3`, { headers: { api_key: AEMET_API_KEY }, signal: AbortSignal.timeout(8000) })
+              .then((r) => ({ name: "aemet_api", ok: r.status !== 401 && r.status !== 403, detail: `HTTP ${r.status}` }))
+              .catch((e) => ({ name: "aemet_api", ok: false, detail: e?.message }))
+          : Promise.resolve({ name: "aemet_api", ok: false, detail: "AEMET_API_KEY no configurada" }),
+        // Meta WhatsApp token
+        WHATSAPP_API_TOKEN
+          ? fetch(`https://graph.facebook.com/debug_token?input_token=${WHATSAPP_API_TOKEN}&access_token=${WHATSAPP_API_TOKEN}`, { signal: AbortSignal.timeout(8000) })
+              .then((r) => r.json())
+              .then((d) => {
+                if (d?.error) return { name: "meta_wa_token", ok: false, detail: d.error.message };
+                const exp = d?.data?.expires_at;
+                const expStr = exp ? new Date(exp * 1000).toISOString().slice(0, 10) : "no expira";
+                return { name: "meta_wa_token", ok: d?.data?.is_valid ?? false, detail: `válido hasta ${expStr}` };
+              })
+              .catch((e) => ({ name: "meta_wa_token", ok: false, detail: e?.message }))
+          : Promise.resolve({ name: "meta_wa_token", ok: false, detail: "WHATSAPP_API_TOKEN no configurada" }),
+        // BunnyDB
+        db
+          ? db.execute("SELECT 1").then(() => ({ name: "bunnydb", ok: true, detail: "conectado" })).catch((e) => ({ name: "bunnydb", ok: false, detail: e?.message }))
+          : Promise.resolve({ name: "bunnydb", ok: false, detail: "LIBSQL_URL no configurada" }),
+        // Bunny Storage
+        BUNNY_STORAGE_ZONE && BUNNY_STORAGE_PASSWORD
+          ? fetch(`https://${BUNNY_STORAGE_HOST}/${BUNNY_STORAGE_ZONE}/`, { headers: { AccessKey: BUNNY_STORAGE_PASSWORD }, signal: AbortSignal.timeout(8000) })
+              .then((r) => ({ name: "bunny_storage", ok: r.ok || r.status === 404, detail: `HTTP ${r.status}` }))
+              .catch((e) => ({ name: "bunny_storage", ok: false, detail: e?.message }))
+          : Promise.resolve({ name: "bunny_storage", ok: false, detail: "BUNNY_STORAGE_ZONE/PASSWORD no configuradas" }),
+        // Sesión WA local
+        Promise.resolve({
+          name: "wa_session",
+          ok: existsSync(join(root, ".wwebjs_auth")),
+          detail: existsSync(join(root, ".wwebjs_auth")) ? "sesión local presente" : "sin sesión local (se restaura de Bunny Storage al enviar)",
+        }),
+        // Open-Meteo (sin auth)
+        fetchOpenMeteo()
+          .then((d) => ({ name: "open_meteo", ok: !!(d?.meteo?.current), detail: "OK" }))
+          .catch((e) => ({ name: "open_meteo", ok: false, detail: e?.message })),
+      ]);
+      const allOk = checks.every((c) => c.ok);
+      return json(res, allOk ? 200 : 207, {
+        ok: allOk,
+        checked_at: new Date().toISOString(),
+        services: checks,
       });
     }
 
