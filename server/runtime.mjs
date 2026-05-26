@@ -79,13 +79,16 @@ const haversineKm = (lat1, lon1, lat2, lon2) => {
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
 
+const FETCH_TIMEOUT_MS = 8000;
+
 async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
+  const signal = options.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  const res = await fetch(url, { ...options, signal });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.json();
 }
 
-async function fetchJsonRetry(url, options = {}, retries = 2) {
+async function fetchJsonRetry(url, options = {}, retries = 1) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
@@ -109,7 +112,8 @@ function htmlDecode(input = "") {
 }
 
 async function fetchText(url, options = {}) {
-  const res = await fetch(url, options);
+  const signal = options.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  const res = await fetch(url, { ...options, signal });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
   return res.text();
 }
@@ -1113,15 +1117,16 @@ ${qrString
     }
 
     if (url.pathname === "/api/meteo") {
+      const safe = (p, fallback) => p.catch((err) => { console.warn("fetch fallback:", err?.message); return fallback; });
       const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, avametBundle, aemetMaritime] = await Promise.all([
-        fetchOpenMeteo(),
-        fetchWindyPoint(),
-        fetchWindguruNearest(),
-        fetchAemetAlerts(),
-        fetchAemetAlertsFromRssCap(),
-        fetchAemetAlertsArchive(5),
-        fetchAvametBenicasimStations(),
-        fetchAemetMaritimeCastellon(),
+        safe(fetchOpenMeteo(), { meteo: {}, marine: {} }),
+        safe(fetchWindyPoint(), { wind: null, gust: null, dir: null }),
+        safe(fetchWindguruNearest(), { nearest: null, wind: null, gust: null, dir: null }),
+        safe(fetchAemetAlerts(), []),
+        safe(fetchAemetAlertsFromRssCap(), []),
+        safe(fetchAemetAlertsArchive(5), []),
+        safe(fetchAvametBenicasimStations(), { around: [], primary: [], interpolation: null }),
+        safe(fetchAemetMaritimeCastellon(), {}),
       ]);
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
