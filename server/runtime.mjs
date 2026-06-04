@@ -644,7 +644,7 @@ async function fetchCastellonStations() {
 
 async function fetchAvametBenicasimStations() {
   try {
-    const data = await fetchJsonRetry("https://www.avamet.org/mxo-i-2023.json", {}, 2);
+    const data = await fetchJsonRetry("https://www.avamet.org/mxo-i-2023.json", { signal: AbortSignal.timeout(15000) }, 1);
     const rows = Array.isArray(data) ? data : [];
     const around = rows
       .map((row) => {
