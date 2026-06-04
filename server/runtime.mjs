@@ -644,10 +644,25 @@ async function fetchCastellonStations() {
 
 async function fetchAvametBenicasimStations() {
   try {
-    const data = await fetchJsonRetry("https://www.avamet.org/mxo-i-2023.json", {
-      signal: AbortSignal.timeout(15000),
-      headers: { "Accept-Encoding": "gzip, deflate, br", "User-Agent": "CVB-Meteo/1.0" },
-    }, 1);
+    // Primary: read from Bunny Storage cache (updated every 5 min by GitHub Actions)
+    // Fallback: fetch AVAMET directly (works in dev, may timeout in MC)
+    let data;
+    if (BUNNY_STORAGE_ZONE && BUNNY_STORAGE_PASSWORD) {
+      const cacheUrl = `https://${BUNNY_STORAGE_HOST}/${BUNNY_STORAGE_ZONE}/state/avamet-cache.json`;
+      const cacheRes = await fetch(cacheUrl, {
+        headers: { AccessKey: BUNNY_STORAGE_PASSWORD },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (cacheRes.ok) {
+        data = await cacheRes.json();
+      }
+    }
+    if (!data) {
+      data = await fetchJsonRetry("https://www.avamet.org/mxo-i-2023.json", {
+        signal: AbortSignal.timeout(15000),
+        headers: { "Accept-Encoding": "gzip, deflate, br", "User-Agent": "CVB-Meteo/1.0" },
+      }, 1);
+    }
     const rows = Array.isArray(data) ? data : [];
     const around = rows
       .map((row) => {

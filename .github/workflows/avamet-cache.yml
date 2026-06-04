@@ -1,0 +1,29 @@
+name: AVAMET cache → Bunny Storage
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # cada 5 minutos
+  workflow_dispatch:         # también ejecutable manualmente
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch AVAMET JSON
+        run: |
+          curl -sf \
+            -H "Accept-Encoding: gzip, deflate, br" \
+            -H "User-Agent: CVB-Meteo/1.0" \
+            --max-time 30 \
+            "https://www.avamet.org/mxo-i-2023.json" \
+            -o avamet.json
+          echo "Size: $(wc -c < avamet.json) bytes"
+
+      - name: Upload to Bunny Storage
+        run: |
+          curl -sf -X PUT \
+            -H "AccessKey: ${{ secrets.BUNNY_STORAGE_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            --data-binary @avamet.json \
+            "https://storage.bunnycdn.com/${{ secrets.BUNNY_STORAGE_ZONE }}/state/avamet-cache.json"
+          echo "Upload OK"
