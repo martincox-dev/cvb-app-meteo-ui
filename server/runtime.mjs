@@ -696,7 +696,8 @@ async function fetchAvametBenicasimStations() {
     const out = { around, primary, interpolation };
     if (around.length) LAST_AVAMET_BUNDLE = out;
     return out;
-  } catch {
+  } catch (e) {
+    console.error("fetchAvametBenicasimStations error:", e?.message || e);
     return LAST_AVAMET_BUNDLE;
   }
 }
