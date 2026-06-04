@@ -1121,16 +1121,17 @@ ${qrString
 
     if (url.pathname === "/api/meteo") {
       const safe = (p, fallback) => p.catch((err) => { console.warn("fetch fallback:", err?.message); return fallback; });
-      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, avametBundle, aemetMaritime] = await Promise.all([
+      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, aemetMaritime] = await Promise.all([
         safe(fetchOpenMeteo(), { meteo: {}, marine: {} }),
         safe(fetchWindyPoint(), { wind: null, gust: null, dir: null }),
         safe(fetchWindguruNearest(), { nearest: null, wind: null, gust: null, dir: null }),
         safe(fetchAemetAlerts(), []),
         safe(fetchAemetAlertsFromRssCap(), []),
         safe(fetchAemetAlertsArchive(5), []),
-        safe(fetchAvametBenicasimStations(), { around: [], primary: [], interpolation: null }),
         safe(fetchAemetMaritimeCastellon(), {}),
       ]);
+      // Use cached AVAMET bundle from polling loop (updated every 2 min) — avoids blocking on slow AVAMET fetch
+      const avametBundle = LAST_AVAMET_BUNDLE;
       const current = meteo.current || {};
       const marineCurrent = marine.current || {};
       const windSpeed = avametBundle.interpolation?.wind ?? windguru.wind ?? windy.wind ?? toKn(current.wind_speed_10m);
