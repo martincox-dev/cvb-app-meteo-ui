@@ -82,7 +82,7 @@ const haversineKm = (lat1, lon1, lat2, lon2) => {
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
 
-const FETCH_TIMEOUT_MS = 8000;
+const FETCH_TIMEOUT_MS = 5000;
 
 async function fetchJson(url, options = {}) {
   const signal = options.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS);
@@ -91,7 +91,7 @@ async function fetchJson(url, options = {}) {
   return res.json();
 }
 
-async function fetchJsonRetry(url, options = {}, retries = 1) {
+async function fetchJsonRetry(url, options = {}, retries = 0) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
