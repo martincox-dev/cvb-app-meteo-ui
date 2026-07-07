@@ -32,3 +32,6 @@ dist-ssr
 whatsapp-groups.local
 .wwebjs_auth
 .wwebjs_cache
+
+# Sesión WA temporal (backup/restore local)
+.tmp/

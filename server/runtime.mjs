@@ -11,10 +11,10 @@ const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
 const LON = Number(process.env.LONGITUDE || "0.0651749140667065");
 const AEMET_API_KEY = process.env.AEMET_API_KEY || "";
-const AEMET_TARGET_ZONE_CODES = (process.env.AEMET_TARGET_ZONE_CODES || "").split(",").map((s) => s.trim()).filter(Boolean);
+const AEMET_TARGET_ZONE_CODES = (process.env.AEMET_TARGET_ZONE_CODES || "771204").split(",").map((s) => s.trim()).filter(Boolean);
 const AEMET_TARGET_KEYWORDS = (
   process.env.AEMET_TARGET_KEYWORDS ||
-  "Litoral Sur Castellón,Litoral Sur Castellón - Costa"
+  "Litoral Sur Castellón,Litoral Sur de Castellón,Litoral Sur Castellón - Costa"
 ).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const WINDY_API_KEY = process.env.WINDY_API_KEY || "";
 const WINDGURU_STATIONS_URL = process.env.WINDGURU_STATIONS_URL || "https://stations.windguru.cz/data_api.php";
@@ -55,6 +55,7 @@ const SAMPLE_INTERVAL_MS = 2 * 60 * 1000;
 let LAST_AVAMET_BUNDLE = { around: [], primary: [], interpolation: null };
 let INTERPOLATED_SAMPLES = [];
 let AUTO_SEND_RUNNING = false;
+let LAST_AUTO_DISPATCH = { at: null, alerts_seen: 0, sent: 0, error: null };
 const SENT_ALERT_KEYS_FILE = join(root, "server", "sent-alert-keys.json");
 let SENT_ALERT_KEYS = new Set();
 const db = LIBSQL_URL && LIBSQL_AUTH_TOKEN
@@ -155,7 +156,9 @@ function getTag(xml, tag) {
 }
 
 function parseTarFromGzipBuffer(gzipBuffer) {
-  const buf = gunzipSync(gzipBuffer);
+  // Accept both .tar.gz (RSS feeds) and plain .tar (opendata API)
+  const isGzip = gzipBuffer[0] === 0x1f && gzipBuffer[1] === 0x8b;
+  const buf = isGzip ? gunzipSync(gzipBuffer) : gzipBuffer;
   const entries = [];
   let offset = 0;
   while (offset + 512 <= buf.length) {
@@ -173,36 +176,62 @@ function parseTarFromGzipBuffer(gzipBuffer) {
 }
 
 function parseCapXmlToAlerts(xml) {
+  // Guards on root <alert>: ignore tests, drafts and cancellations
+  const status = getTag(xml, "status");
+  const msgType = getTag(xml, "msgType");
+  if (status && status !== "Actual") return [];
+  if (msgType === "Cancel") return [];
+  const identifier = getTag(xml, "identifier");
+
   const infoBlocks = [...xml.matchAll(/<info[\s\S]*?<\/info>/gi)].map((m) => m[0]);
   const alerts = [];
   for (const block of infoBlocks) {
-    const event = getTag(block, "event");
+    // AEMET publishes each aviso in es-ES and en-GB — keep only Spanish
+    const language = getTag(block, "language");
+    if (language && !language.toLowerCase().startsWith("es")) continue;
+
     const severity = getTag(block, "severity");
+    const sev = String(severity || "").toLowerCase();
+    const level = sev.includes("extreme")
+      ? "rojo"
+      : sev.includes("severe")
+        ? "naranja"
+        : sev.includes("moderate")
+          ? "amarillo"
+          : "verde";
+    // Minor = verde = "no risk" bulletins, never worth relaying
+    if (level === "verde") continue;
+
+    const expires = getTag(block, "expires");
+    if (expires && new Date(expires).getTime() < Date.now()) continue;
+
+    const event = getTag(block, "event");
     const description = getTag(block, "description");
     const effective = getTag(block, "effective");
-    const expires = getTag(block, "expires");
-    const areaDesc = getTag(block, "areaDesc");
+    const onset = getTag(block, "onset");
     const headline = getTag(block, "headline");
     const certainty = getTag(block, "certainty");
-    if (!event && !description && !areaDesc) continue;
-    alerts.push({
-      id: `cap-${Math.random().toString(36).slice(2, 10)}`,
-      level: String(severity || "").toLowerCase().includes("extreme")
-        ? "rojo"
-        : String(severity || "").toLowerCase().includes("severe")
-          ? "naranja"
-          : String(severity || "").toLowerCase().includes("moderate")
-            ? "amarillo"
-            : "verde",
-      levelLabel: severity || "Aviso",
-      phenomenon: event || "Aviso meteorológico",
-      area: areaDesc || "Castellón",
-      description: htmlDecode(description || headline || ""),
-      validFrom: effective || new Date().toISOString(),
-      validTo: expires || new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
-      source: "AEMET RSS/CAP",
-      certainty: certainty || "",
-    });
+    if (!event && !description) continue;
+
+    // One alert per <area>: multi-zone bulletins carry several areas per <info>
+    const areaBlocks = [...block.matchAll(/<area>[\s\S]*?<\/area>/gi)].map((m) => m[0]);
+    for (const ab of areaBlocks.length ? areaBlocks : [block]) {
+      const areaDesc = getTag(ab, "areaDesc");
+      const areaCode = ((ab.match(/<geocode>[\s\S]*?<\/geocode>/i) || [])[0]?.match(/<value>(\w+)<\/value>/i) || [])[1] || "";
+      alerts.push({
+        id: `${identifier || "cap"}-${areaCode || Math.random().toString(36).slice(2, 8)}`,
+        level,
+        levelLabel: severity || "Aviso",
+        phenomenon: event || "Aviso meteorológico",
+        area: areaDesc || "Castellón",
+        areaCode,
+        description: htmlDecode(description || headline || ""),
+        validFrom: onset || effective || new Date().toISOString(),
+        validTo: expires || new Date(Date.now() + 6 * 3600 * 1000).toISOString(),
+        source: "AEMET RSS/CAP",
+        certainty: certainty || "",
+      });
+    }
   }
   return alerts;
 }
@@ -216,7 +245,7 @@ async function fetchAemetAlertsFromRssCap(filtered = true) {
         ? getTag(rss, "link")
         : ((rss.match(/<link>(https?:\/\/[^<]+\.tar\.gz)<\/link>/i) || [])[1] || "");
       if (!tarLink) continue;
-      const resp = await fetch(tarLink);
+      const resp = await fetch(tarLink, { signal: AbortSignal.timeout(10000) });
       if (!resp.ok) continue;
       const gzBuf = Buffer.from(await resp.arrayBuffer());
       const files = parseTarFromGzipBuffer(gzBuf).filter((f) => f.name.toLowerCase().endsWith(".xml"));
@@ -293,51 +322,18 @@ async function sendWhatsAppText({ to, text }) {
 }
 
 async function fetchAemetAlerts() {
+  // Official opendata API. Area 77 = Comunitat Valenciana; "datos" is a plain
+  // tar of the same CAP XMLs the RSS feeds carry, so both paths share one parser.
   if (!AEMET_API_KEY) return [];
   try {
-    const idx = await fetchJson("https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/va3", { headers: { api_key: AEMET_API_KEY } });
+    const idx = await fetchJson("https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77", { headers: { api_key: AEMET_API_KEY } });
     if (!idx?.datos) return [];
-    const raw = await fetchJson(idx.datos);
-    const list = Array.isArray(raw) ? raw : [raw];
-    const mapped = list.map((a, i) => {
-      const sev = String(a?.nivel || a?.severity || "").toLowerCase();
-      let level = "verde";
-      if (sev.includes("amar")) level = "amarillo";
-      if (sev.includes("naran")) level = "naranja";
-      if (sev.includes("rojo")) level = "rojo";
-      const areaText = String(a?.ambito || a?.area || a?.geocode || "Litoral Castellón");
-      const areaCode = String(a?.idZona || a?.code || a?.geocode || a?.id || "");
-      const desc = String(
-        a?.descripcion ||
-        a?.description ||
-        a?.instruction ||
-        a?.headline ||
-        a?.event ||
-        "Aviso oficial de AEMET"
-      );
-      return {
-        id: String(a?.id || `aemet-${i}`),
-        areaCode,
-        level,
-        levelLabel: level === "amarillo" ? "Aviso Amarillo" : level === "naranja" ? "Aviso Naranja" : level === "rojo" ? "Aviso Rojo" : "Sin Aviso",
-        phenomenon: a?.fenomeno || a?.phenomenon || "Aviso meteorológico",
-        area: areaText,
-        description: desc,
-        validFrom: a?.inicio || a?.effective || new Date().toISOString(),
-        validTo: a?.fin || a?.expires || new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
-        raw: a,
-        source: "AEMET",
-      };
-    });
-    const filtered = mapped.filter((alert) => {
-      const haystack = `${alert.area} ${alert.description}`.toLowerCase();
-      const byKeyword = AEMET_TARGET_KEYWORDS.some((k) => haystack.includes(k));
-      const byCode = AEMET_TARGET_ZONE_CODES.length
-        ? AEMET_TARGET_ZONE_CODES.some((c) => String(alert.areaCode).includes(c))
-        : false;
-      return byKeyword || byCode;
-    });
-    return filtered;
+    const resp = await fetch(idx.datos, { signal: AbortSignal.timeout(10000) });
+    if (!resp.ok) return [];
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const files = parseTarFromGzipBuffer(buf).filter((f) => f.name.toLowerCase().endsWith(".xml"));
+    const alerts = files.flatMap((f) => parseCapXmlToAlerts(f.content));
+    return alerts.filter((a) => isInTargetAemetZone(a)).map((a) => ({ ...a, source: "AEMET API" }));
   } catch {
     return [];
   }
@@ -529,69 +525,42 @@ function contentType(path) {
   return "application/octet-stream";
 }
 
-function toAemetUtc(date) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return (
-    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
-    `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}UTC`
-  );
-}
-
-async function fetchAemetAlertsArchive(days = 3) {
-  if (!AEMET_API_KEY) return [];
+async function alertHistoryFromDb(limit = 30) {
+  // History = avisos this system actually dispatched (alert_dispatches table).
+  // The opendata "archivo" endpoint is a multi-MB national tar capped at 2 days — not worth polling.
+  if (!db) return [];
   try {
-    const end = new Date();
-    const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const url =
-      `https://opendata.aemet.es/opendata/api/avisos_cap/archivo/fechaini/${toAemetUtc(start)}/fechafin/${toAemetUtc(end)}`;
-    const idx = await fetchJson(url, { headers: { api_key: AEMET_API_KEY } });
-    if (!idx?.datos) return [];
-    const raw = await fetchJson(idx.datos);
-    const list = Array.isArray(raw) ? raw : [raw];
-    return list;
+    const r = await db.execute({
+      sql: "SELECT alert_key, sent_at, area, level, phenomenon, valid_from, valid_to FROM alert_dispatches ORDER BY sent_at DESC LIMIT ?",
+      args: [limit],
+    });
+    return (r.rows || []).map((row, i) => ({
+      id: String(row.alert_key || `hist-${i}`),
+      level: String(row.level || "amarillo"),
+      levelLabel: `Aviso ${String(row.level || "")}`.trim(),
+      phenomenon: String(row.phenomenon || "Aviso meteorológico"),
+      area: String(row.area || "Litoral sur de Castellón"),
+      description: `Aviso enviado a los grupos el ${formatMadridDateTime(new Date(Number(row.sent_at)))}`,
+      validFrom: String(row.valid_from || ""),
+      validTo: String(row.valid_to || ""),
+      source: "Historial CVB",
+    }));
   } catch {
     return [];
   }
 }
 
-function mapAemetAlertRaw(a, i = 0) {
-  const sev = String(a?.nivel || a?.severity || "").toLowerCase();
-  let level = "verde";
-  if (sev.includes("amar")) level = "amarillo";
-  if (sev.includes("naran")) level = "naranja";
-  if (sev.includes("rojo")) level = "rojo";
-  const areaText = String(a?.ambito || a?.area || a?.geocode || "Litoral Castellón");
-  const areaCode = String(a?.idZona || a?.code || a?.geocode || a?.id || "");
-  const desc = String(
-    a?.descripcion ||
-    a?.description ||
-    a?.instruction ||
-    a?.headline ||
-    a?.event ||
-    "Aviso oficial de AEMET"
-  );
-  return {
-    id: String(a?.id || `aemet-${i}`),
-    areaCode,
-    level,
-    levelLabel: level === "amarillo" ? "Aviso Amarillo" : level === "naranja" ? "Aviso Naranja" : level === "rojo" ? "Aviso Rojo" : "Sin Aviso",
-    phenomenon: a?.fenomeno || a?.phenomenon || "Aviso meteorológico",
-    area: areaText,
-    description: desc,
-    validFrom: a?.inicio || a?.effective || new Date().toISOString(),
-    validTo: a?.fin || a?.expires || new Date(Date.now() + 4 * 3600 * 1000).toISOString(),
-    raw: a,
-    source: "AEMET",
-  };
-}
-
 function isInTargetAemetZone(alert) {
-  const haystack = `${alert.area} ${alert.description}`.toLowerCase();
-  const byKeyword = AEMET_TARGET_KEYWORDS.some((k) => haystack.includes(k));
-  const byCode = AEMET_TARGET_ZONE_CODES.length
-    ? AEMET_TARGET_ZONE_CODES.some((c) => String(alert.areaCode).includes(c))
-    : false;
-  return byKeyword || byCode;
+  // Primary: official AEMET zone code from the geocode element
+  if (alert.areaCode && AEMET_TARGET_ZONE_CODES.some((c) => alert.areaCode === c)) return true;
+  // Fallback: keyword match (covers missing or higher-level geocodes).
+  // Word-by-word matching only against the zone name — matching words inside the
+  // description would let e.g. "viento del sur" leak alerts from other zones.
+  const areaName = String(alert.area || "").toLowerCase();
+  const haystack = `${areaName} ${String(alert.description || "").toLowerCase()}`;
+  return AEMET_TARGET_KEYWORDS.some(
+    (k) => haystack.includes(k) || k.split(/\s+/).every((w) => areaName.includes(w))
+  );
 }
 
 async function fetchCastellonStations() {
@@ -822,21 +791,47 @@ function alertRank(level) {
 }
 
 function alertFingerprint(alert) {
-  const area = String(alert?.area || "").trim().toLowerCase();
-  const phenomenon = String(alert?.phenomenon || "").trim().toLowerCase();
-  const level = String(alert?.level || "").trim().toLowerCase();
-  const from = String(alert?.validFrom || "").trim();
-  const to = String(alert?.validTo || "").trim();
-  return `${area}__${phenomenon}__${level}__${from}__${to}`;
+  // Stable across AEMET re-publications (msgType=Update): zone + phenomenon + level + onset.
+  // Deliberately excludes expires so extending an aviso doesn't re-notify;
+  // an escalation (amarillo -> naranja) changes level and does notify again.
+  // onset normalized to epoch so "+02:00" vs "Z" spellings of the same instant match.
+  const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const zone = norm(alert?.areaCode || alert?.area);
+  const phenomenon = norm(alert?.phenomenon);
+  const level = norm(alert?.level);
+  const fromTs = new Date(alert?.validFrom || "").getTime();
+  const from = Number.isNaN(fromTs) ? norm(alert?.validFrom) : String(fromTs);
+  return `${zone}__${phenomenon}__${level}__${from}`;
+}
+
+function formatMadridDateTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso || "-");
+  return new Intl.DateTimeFormat("es-ES", {
+    timeZone: "Europe/Madrid",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d);
+}
+
+function levelEmoji(level) {
+  if (level === "rojo") return "🔴";
+  if (level === "naranja") return "🟠";
+  if (level === "amarillo") return "🟡";
+  return "🟢";
 }
 
 function formatAlertWhatsappText(alert) {
+  const nivel = String(alert.level || "-");
   return [
     "⚠️ Aviso meteorológico AEMET",
-    `📍 Ámbito: ${String(alert.area || "-")}`,
-    `🚨 Nivel: ${String(alert.levelLabel || alert.level || "-")} · ${String(alert.phenomenon || "-")}`,
+    `📍 Zona: ${String(alert.area || "-")}`,
+    `${levelEmoji(alert.level)} Nivel ${nivel} · ${String(alert.phenomenon || "-")}`,
     `📝 ${String(alert.description || "Aviso oficial de AEMET")}`,
-    `🕒 Franja: ${String(alert.validFrom || "-")} -> ${String(alert.validTo || "-")}`,
+    `🕒 De ${formatMadridDateTime(alert.validFrom)} a ${formatMadridDateTime(alert.validTo)}`,
     "",
     "🔗 Portal meteo CVB:",
     "https://meteo.cvbenicasim.com",
@@ -912,16 +907,27 @@ async function autoDispatchAemetAlertsToGroups() {
   AUTO_SEND_RUNNING = true;
   try {
     const [apiAlerts, rssAlerts] = await Promise.all([fetchAemetAlerts(), fetchAemetAlertsFromRssCap()]);
-    const alerts = (apiAlerts.length ? apiAlerts : rssAlerts)
-      .sort((a, b) => alertRank(b.level) - alertRank(a.level));
+    // Merge both sources and dedupe by fingerprint — they carry the same CAP avisos
+    const byFp = new Map();
+    for (const a of [...apiAlerts, ...rssAlerts]) {
+      const fp = alertFingerprint(a);
+      if (!byFp.has(fp)) byFp.set(fp, a);
+    }
+    const alerts = [...byFp.values()].sort((a, b) => alertRank(b.level) - alertRank(a.level));
+    LAST_AUTO_DISPATCH = { at: new Date().toISOString(), alerts_seen: alerts.length, sent: 0, error: null };
     if (!alerts.length) return;
 
     for (const alert of alerts) {
+      // Never relay verde/unknown levels or already-expired avisos
+      if (alertRank(alert.level) < 2) continue;
+      const expiresTs = new Date(alert.validTo || 0).getTime();
+      if (expiresTs && expiresTs < Date.now()) continue;
       const fp = alertFingerprint(alert);
       if (SENT_ALERT_KEYS.has(fp)) continue;
       const text = formatAlertWhatsappText(alert);
       await sendAlertToConfiguredGroups(text);
       SENT_ALERT_KEYS.add(fp);
+      LAST_AUTO_DISPATCH.sent += 1;
       if (db) {
         await db.execute({
           sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -944,6 +950,7 @@ async function autoDispatchAemetAlertsToGroups() {
     }
   } catch (err) {
     console.error("autoDispatchAemetAlertsToGroups error:", err?.message || err);
+    LAST_AUTO_DISPATCH.error = String(err?.message || err);
   } finally {
     AUTO_SEND_RUNNING = false;
   }
@@ -999,7 +1006,12 @@ const server = createServer(async (req, res) => {
         });
       }
       const [apiAlerts, rssAlerts] = await Promise.all([fetchAemetAlerts(), fetchAemetAlertsFromRssCap()]);
-      const alerts = apiAlerts.length ? apiAlerts : rssAlerts;
+      const sendByFp = new Map();
+      for (const a of [...apiAlerts, ...rssAlerts]) {
+        const fp = alertFingerprint(a);
+        if (!sendByFp.has(fp)) sendByFp.set(fp, a);
+      }
+      const alerts = [...sendByFp.values()];
       if (!alerts.length) {
         return json(res, 404, {
           ok: false,
@@ -1017,8 +1029,8 @@ const server = createServer(async (req, res) => {
           { type: "text", text: String(alert.levelLabel || alert.level || "-").slice(0, 1024) },
           { type: "text", text: String(alert.phenomenon || "-").slice(0, 1024) },
           { type: "text", text: String(alert.description || "-").slice(0, 1024) },
-          { type: "text", text: String(alert.validFrom || "-").slice(0, 1024) },
-          { type: "text", text: String(alert.validTo || "-").slice(0, 1024) },
+          { type: "text", text: formatMadridDateTime(alert.validFrom).slice(0, 1024) },
+          { type: "text", text: formatMadridDateTime(alert.validTo).slice(0, 1024) },
         ];
         const send = await sendWhatsAppTemplate({
           to: destination,
@@ -1052,9 +1064,8 @@ const server = createServer(async (req, res) => {
         });
       }
       const destination = WHATSAPP_TEST_TO || "34677025272";
-      const [archiveRaw, rssAll] = await Promise.all([fetchAemetAlertsArchive(5), fetchAemetAlertsFromRssCap(false)]);
-      const archiveAlerts = archiveRaw.map((a, i) => mapAemetAlertRaw(a, i));
-      const candidates = [...archiveAlerts, ...rssAll];
+      const [apiAll, rssAll] = await Promise.all([fetchAemetAlerts(), fetchAemetAlertsFromRssCap(false)]);
+      const candidates = [...apiAll, ...rssAll];
       if (!candidates.length) {
         return json(res, 404, { ok: false, error: "no_aemet_alerts_available" });
       }
@@ -1064,8 +1075,8 @@ const server = createServer(async (req, res) => {
         { type: "text", text: String(selected.levelLabel || selected.level || "-").slice(0, 1024) },
         { type: "text", text: String(selected.phenomenon || "-").slice(0, 1024) },
         { type: "text", text: String(selected.description || "-").slice(0, 1024) },
-        { type: "text", text: String(selected.validFrom || "-").slice(0, 1024) },
-        { type: "text", text: String(selected.validTo || "-").slice(0, 1024) },
+        { type: "text", text: formatMadridDateTime(selected.validFrom).slice(0, 1024) },
+        { type: "text", text: formatMadridDateTime(selected.validTo).slice(0, 1024) },
       ];
       const send = await sendWhatsAppTemplate({
         to: destination,
@@ -1140,13 +1151,13 @@ ${qrString
 
     if (url.pathname === "/api/meteo") {
       const safe = (p, fallback) => p.catch((err) => { console.warn("fetch fallback:", err?.message); return fallback; });
-      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetArchiveRaw, aemetMaritime] = await Promise.all([
+      const [{ meteo, marine }, windy, windguru, aemetAlerts, aemetRssAlerts, aemetHistoryDb, aemetMaritime] = await Promise.all([
         safe(fetchOpenMeteo(), { meteo: {}, marine: {} }),
         safe(fetchWindyPoint(), { wind: null, gust: null, dir: null }),
         safe(fetchWindguruNearest(), { nearest: null, wind: null, gust: null, dir: null }),
         safe(fetchAemetAlerts(), []),
         safe(fetchAemetAlertsFromRssCap(), []),
-        safe(fetchAemetAlertsArchive(5), []),
+        safe(alertHistoryFromDb(30), []),
         safe(fetchAemetMaritimeCastellon(), {}),
       ]);
       // Use cached AVAMET bundle from polling loop (updated every 2 min) — avoids blocking on slow AVAMET fetch
@@ -1195,13 +1206,15 @@ ${qrString
         hourly,
         forecast,
       };
-      const aemetHistory = aemetArchiveRaw
-        .map((a, i) => mapAemetAlertRaw(a, i))
-        .filter((a) => isInTargetAemetZone(a))
-        .sort((a, b) => new Date(b.validFrom).getTime() - new Date(a.validFrom).getTime())
-        .slice(0, 30);
+      const aemetHistory = aemetHistoryDb;
 
-      const mergedAlerts = aemetAlerts.length ? aemetAlerts : aemetRssAlerts;
+      // Merge API + RSS, dedupe by fingerprint (both carry the same CAP avisos)
+      const alertsByFp = new Map();
+      for (const a of [...aemetAlerts, ...aemetRssAlerts]) {
+        const fp = alertFingerprint(a);
+        if (!alertsByFp.has(fp)) alertsByFp.set(fp, a);
+      }
+      const mergedAlerts = [...alertsByFp.values()].sort((a, b) => alertRank(b.level) - alertRank(a.level));
       const mergedStations = (avametBundle.around || []).filter((s) => AVAMET_MAP_IDS.includes(s.id));
       const seaTempFallback = Number(marineCurrent.sea_surface_temperature);
       const waveFallback = Number(marineCurrent.wave_height);
@@ -1230,6 +1243,53 @@ ${qrString
       });
     }
 
+    if (url.pathname === "/api/aemet/dry-run") {
+      // Runs the exact dispatcher pipeline (fetch -> merge -> filters -> dedup)
+      // and reports what WOULD be sent to the groups, without sending anything.
+      const [apiAlerts, rssAlerts] = await Promise.all([
+        fetchAemetAlerts().catch(() => []),
+        fetchAemetAlertsFromRssCap().catch(() => []),
+      ]);
+      const byFp = new Map();
+      for (const a of [...apiAlerts, ...rssAlerts]) {
+        const fp = alertFingerprint(a);
+        if (!byFp.has(fp)) byFp.set(fp, a);
+      }
+      const wouldSend = [];
+      const skipped = [];
+      for (const [fp, a] of byFp) {
+        let reason = null;
+        const expiresTs = new Date(a.validTo || 0).getTime();
+        if (alertRank(a.level) < 2) reason = "nivel_verde";
+        else if (expiresTs && expiresTs < Date.now()) reason = "caducado";
+        else if (SENT_ALERT_KEYS.has(fp)) reason = "ya_enviado";
+        const item = {
+          fingerprint: fp,
+          level: a.level,
+          area: a.area,
+          areaCode: a.areaCode || null,
+          phenomenon: a.phenomenon,
+          validFrom: a.validFrom,
+          validTo: a.validTo,
+          source: a.source,
+        };
+        if (reason) skipped.push({ ...item, reason });
+        else wouldSend.push({ ...item, message: formatAlertWhatsappText(a) });
+      }
+      return json(res, 200, {
+        ok: true,
+        auto_send_enabled: WA_AUTO_SEND_ENABLED,
+        interval_ms: WA_AUTO_SEND_INTERVAL_MS,
+        groups: WA_GROUP_IDS,
+        api_alerts: apiAlerts.length,
+        rss_alerts: rssAlerts.length,
+        unique_after_dedup: byFp.size,
+        would_send: wouldSend,
+        skipped,
+        last_dispatch: LAST_AUTO_DISPATCH,
+      });
+    }
+
     if (url.pathname === "/api/status") {
       const checks = await Promise.all([
         // AVAMET
@@ -1242,7 +1302,7 @@ ${qrString
           .catch((e) => ({ name: "aemet_rss", ok: false, detail: e?.message })),
         // AEMET API key
         AEMET_API_KEY
-          ? fetch(`https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/va3`, { headers: { api_key: AEMET_API_KEY }, signal: AbortSignal.timeout(8000) })
+          ? fetch(`https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77`, { headers: { api_key: AEMET_API_KEY }, signal: AbortSignal.timeout(8000) })
               .then((r) => ({ name: "aemet_api", ok: r.status !== 401 && r.status !== 403, detail: `HTTP ${r.status}` }))
               .catch((e) => ({ name: "aemet_api", ok: false, detail: e?.message }))
           : Promise.resolve({ name: "aemet_api", ok: false, detail: "AEMET_API_KEY no configurada" }),
@@ -1278,6 +1338,26 @@ ${qrString
         fetchOpenMeteo()
           .then((d) => ({ name: "open_meteo", ok: !!(d?.meteo?.current), detail: "OK" }))
           .catch((e) => ({ name: "open_meteo", ok: false, detail: e?.message })),
+        // Despacho automático de alertas AEMET a grupos WA
+        (async () => {
+          let lastDbSend = null;
+          if (db) {
+            try {
+              const r = await db.execute("SELECT MAX(sent_at) AS t FROM alert_dispatches");
+              const t = Number(r.rows?.[0]?.t || 0);
+              if (t) lastDbSend = new Date(t).toISOString();
+            } catch { /* table may not exist yet */ }
+          }
+          const parts = [
+            `auto_send=${WA_AUTO_SEND_ENABLED}`,
+            `último ciclo: ${LAST_AUTO_DISPATCH.at || "aún no ejecutado"}`,
+            `alertas vistas: ${LAST_AUTO_DISPATCH.alerts_seen}`,
+            `enviadas en ese ciclo: ${LAST_AUTO_DISPATCH.sent}`,
+            `último envío registrado: ${lastDbSend || "ninguno"}`,
+          ];
+          if (LAST_AUTO_DISPATCH.error) parts.push(`error: ${LAST_AUTO_DISPATCH.error}`);
+          return { name: "alert_dispatch", ok: WA_AUTO_SEND_ENABLED && !LAST_AUTO_DISPATCH.error, detail: parts.join(" · ") };
+        })(),
       ]);
       const allOk = checks.every((c) => c.ok);
       return json(res, allOk ? 200 : 207, {
@@ -1298,11 +1378,32 @@ ${qrString
   }
 });
 
-server.listen(PORT, () => console.log(`runtime server on ${PORT}`));
-initDb()
-  .then(() => loadSentAlertKeys())
-  .then(() => autoDispatchAemetAlertsToGroups())
-  .catch((err) => console.error("init startup error:", err?.message || err));
-pollInterpolatedSample();
-setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
-setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
+// DB must be ready (tables created) before anything writes samples or reads dispatch keys
+async function startBackgroundLoops() {
+  try {
+    await initDb();
+    await loadSentAlertKeys();
+  } catch (err) {
+    console.error("init startup error:", err?.message || err);
+  }
+  pollInterpolatedSample();
+  autoDispatchAemetAlertsToGroups();
+  setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
+  setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
+}
+
+// RUNTIME_TEST_MODE=1 allows importing this module (npm test) without side effects
+if (process.env.RUNTIME_TEST_MODE !== "1") {
+  server.listen(PORT, () => console.log(`runtime server on ${PORT}`));
+  startBackgroundLoops();
+}
+
+export {
+  parseCapXmlToAlerts,
+  parseTarFromGzipBuffer,
+  isInTargetAemetZone,
+  alertFingerprint,
+  alertRank,
+  formatAlertWhatsappText,
+  formatMadridDateTime,
+};
