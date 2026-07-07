@@ -1,9 +1,24 @@
-import pkg from "whatsapp-web.js";
 import fs from "node:fs";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { restoreWaSessionFromStorage, backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
-const { Client, LocalAuth } = pkg;
+// whatsapp-web.js 1.34.x re-injects its page bindings on every framenavigated,
+// but puppeteer keeps bindings across navigations, so the second exposeFunction
+// throws "Failed to add page binding ... already exists" and kills the process.
+// Patch the helper (before requiring the lib, so Client.js destructures the
+// patched reference) to tolerate that specific error.
+const require = createRequire(import.meta.url);
+const pupUtil = require("whatsapp-web.js/src/util/Puppeteer.js");
+const origExpose = pupUtil.exposeFunctionIfAbsent;
+pupUtil.exposeFunctionIfAbsent = async (page, name, fn) => {
+  try {
+    await origExpose(page, name, fn);
+  } catch (err) {
+    if (!String(err?.message || "").includes("already exists")) throw err;
+  }
+};
+const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const HEADLESS = (process.env.WA_HEADLESS || "true") !== "false";
