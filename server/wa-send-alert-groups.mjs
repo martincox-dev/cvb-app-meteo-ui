@@ -107,4 +107,17 @@ try {
   fs.rmSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}/SingletonLock`);
 } catch {}
 
+// Mark the profile as cleanly exited. A profile restored with exit_type=Crashed
+// makes Chromium re-open the old WhatsApp Web tabs, and whatsapp-web.js then
+// fails to inject ("page binding onQRChangedEvent already exists").
+try {
+  const prefsPath = `${rootDir}/.wwebjs_auth/session-${CLIENT_ID}/Default/Preferences`;
+  const prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
+  if (prefs.profile) {
+    prefs.profile.exit_type = "Normal";
+    prefs.profile.exited_cleanly = true;
+    fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+  }
+} catch {}
+
 client.initialize();
