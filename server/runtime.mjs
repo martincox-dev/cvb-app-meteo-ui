@@ -884,14 +884,23 @@ async function sendAlertToGroups(groupIds, text) {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Hard kill if the child wedges (hung Chromium): a send that never returns
+    // leaves AUTO_SEND_RUNNING=true forever and silently stops all future alerts.
+    let killedByTimeout = false;
+    const killer = setTimeout(() => {
+      killedByTimeout = true;
+      try { child.kill("SIGKILL"); } catch {}
+    }, 240000);
     let stderr = "";
     child.stdout.on("data", (d) => process.stdout.write(String(d)));
     child.stderr.on("data", (d) => {
       stderr += String(d);
       process.stderr.write(String(d));
     });
-    child.on("error", reject);
+    child.on("error", (err) => { clearTimeout(killer); reject(err); });
     child.on("close", (code) => {
+      clearTimeout(killer);
+      if (killedByTimeout) return reject(new Error("wa:send:groups timeout (240s), proceso matado"));
       if (code === 0) resolve();
       else reject(new Error(stderr || `wa:send:groups exit ${code}`));
     });

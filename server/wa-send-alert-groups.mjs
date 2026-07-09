@@ -67,8 +67,25 @@ const client = new Client({
 console.log(`Arrancando envío a ${GROUP_IDS.length} grupos (clientId=${CLIENT_ID}, headless=${HEADLESS})`);
 const rootDir = process.cwd();
 
-client.on("qr", () => {
-  console.error("Se requiere QR en esta sesión. Vincula primero con list-cvb-group/wa:test.");
+// Watchdog global: este proceso NUNCA debe colgarse — el dispatcher del runtime
+// espera su salida y un cuelgue bloquea todos los ciclos de alertas siguientes.
+const WATCHDOG_MS = Number(process.env.WA_SEND_TIMEOUT_MS || 150000);
+const watchdog = setTimeout(() => {
+  console.error(`Timeout global de envío tras ${WATCHDOG_MS} ms — abortando`);
+  process.exit(4);
+}, WATCHDOG_MS);
+watchdog.unref();
+
+client.on("qr", async () => {
+  console.error("Se requiere QR: la sesión no es válida. Re-vincular con POST /api/whatsapp/start-qr");
+  try { await client.destroy(); } catch {}
+  process.exit(5);
+});
+
+client.on("auth_failure", async (msg) => {
+  console.error("auth_failure:", msg);
+  try { await client.destroy(); } catch {}
+  process.exit(6);
 });
 
 client.on("ready", async () => {
