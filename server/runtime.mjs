@@ -902,7 +902,7 @@ async function doSendAlertToGroups(groupIds, text) {
     const killer = setTimeout(() => {
       killedByTimeout = true;
       try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
-    }, 240000);
+    }, 480000);
     let stderr = "";
     child.stdout.on("data", (d) => process.stdout.write(String(d)));
     child.stderr.on("data", (d) => {

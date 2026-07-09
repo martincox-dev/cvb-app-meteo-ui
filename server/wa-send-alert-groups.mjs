@@ -69,7 +69,7 @@ const rootDir = process.cwd();
 
 // Watchdog global: este proceso NUNCA debe colgarse — el dispatcher del runtime
 // espera su salida y un cuelgue bloquea todos los ciclos de alertas siguientes.
-const WATCHDOG_MS = Number(process.env.WA_SEND_TIMEOUT_MS || 150000);
+const WATCHDOG_MS = Number(process.env.WA_SEND_TIMEOUT_MS || 420000);
 const watchdog = setTimeout(async () => {
   console.error(`Timeout global de envío tras ${WATCHDOG_MS} ms — abortando`);
   // Close Chromium before exiting or it can outlive us holding the profile
@@ -77,6 +77,14 @@ const watchdog = setTimeout(async () => {
   process.exit(4);
 }, WATCHDOG_MS);
 watchdog.unref();
+
+client.on("loading_screen", (percent, msg) => {
+  console.log(`WA loading ${percent}% ${msg || ""}`);
+});
+
+client.on("authenticated", () => {
+  console.log("WA autenticado");
+});
 
 client.on("qr", async () => {
   console.error("Se requiere QR: la sesión no es válida. Re-vincular con POST /api/whatsapp/start-qr");
@@ -129,11 +137,18 @@ client.on("ready", async () => {
   }
 });
 
-try {
-  const restored = await restoreWaSessionFromStorage(rootDir);
-  console.log("restore WA session:", JSON.stringify(restored));
-} catch (e) {
-  console.error("restore sesión WA warning:", e?.message || e);
+// Keep an existing local session: it may hold sync progress from previous
+// attempts (or a fresher state than the remote snapshot). Only restore from
+// storage when there is no local session at all (fresh container).
+if (fs.existsSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}`)) {
+  console.log("usando sesión local existente (sin restore)");
+} else {
+  try {
+    const restored = await restoreWaSessionFromStorage(rootDir);
+    console.log("restore WA session:", JSON.stringify(restored));
+  } catch (e) {
+    console.error("restore sesión WA warning:", e?.message || e);
+  }
 }
 
 // Remove stale SingletonLock left by a previous Chromium process
