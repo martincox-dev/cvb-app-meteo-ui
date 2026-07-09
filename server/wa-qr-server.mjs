@@ -43,16 +43,19 @@ client.on("authenticated", () => {
 });
 
 client.on("ready", async () => {
-  console.log("WA sesión vinculada — haciendo backup a Bunny Storage...");
+  console.log("WA sesión vinculada — cerrando Chromium antes del backup...");
+  try { await unlink(QR_FILE); } catch {}
+  // Destroy FIRST: tarring a live Chromium profile produces corrupt archives
+  // (files change mid-compression). The session on disk survives destroy().
+  try { await client.destroy(); } catch {}
   try {
-    await backupWaSessionToStorage(process.cwd());
-    console.log("Sesión guardada en Bunny Storage OK");
+    const r = await backupWaSessionToStorage(process.cwd());
+    console.log(`Sesión guardada en Bunny Storage OK (${r?.bytes || "?"} bytes)`);
+    process.exit(0);
   } catch (e) {
     console.error("Error backup sesión:", e?.message || e);
+    process.exit(1);
   }
-  try { await unlink(QR_FILE); } catch {}
-  try { await client.destroy(); } catch {}
-  process.exit(0);
 });
 
 client.on("auth_failure", (msg) => {
