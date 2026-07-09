@@ -61,6 +61,9 @@ const client = new Client({
     headless: HEADLESS,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    // WA Web's first sync keeps the page busy for minutes; puppeteer's default
+    // 180s protocolTimeout kills the send mid-sync. The watchdog bounds us.
+    protocolTimeout: 600000,
   },
 });
 
