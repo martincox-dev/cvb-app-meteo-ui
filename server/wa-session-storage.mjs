@@ -90,10 +90,16 @@ export async function backupWaSessionToStorage(rootDir) {
   });
   if (!res.ok) throw new Error(`backup PUT failed: HTTP ${res.status}`);
 
-  // Confirm the stored object has the exact size we sent
-  const head = await fetch(url, { method: "HEAD", headers: { AccessKey: STORAGE_PASSWORD } });
-  const remoteSize = Number(head.headers.get("content-length") || 0);
-  if (!head.ok || remoteSize !== localSize) {
+  // Confirm the stored object has the exact size we sent. Bunny Storage
+  // rejects HEAD (401), so use a 1-byte ranged GET and read Content-Range.
+  const probe = await fetch(url, {
+    method: "GET",
+    headers: { AccessKey: STORAGE_PASSWORD, Range: "bytes=0-0" },
+  });
+  const contentRange = probe.headers.get("content-range") || "";
+  const remoteSize = Number((contentRange.match(/\/(\d+)$/) || [])[1] || probe.headers.get("content-length") || 0);
+  probe.body?.cancel?.();
+  if (!probe.ok || remoteSize !== localSize) {
     throw new Error(`backup verification failed: local ${localSize} bytes, remoto ${remoteSize} bytes`);
   }
   await rm(tarPath, { force: true });
