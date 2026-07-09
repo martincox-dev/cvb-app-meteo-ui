@@ -870,7 +870,17 @@ async function saveSentAlertKeys() {
   }
 }
 
-async function sendAlertToGroups(groupIds, text) {
+// All WA sends share one Chromium profile: two concurrent send processes
+// (auto-dispatch + wa-test) deadlock each other. Serialize them.
+let WA_SEND_QUEUE = Promise.resolve();
+
+function sendAlertToGroups(groupIds, text) {
+  const job = WA_SEND_QUEUE.then(() => doSendAlertToGroups(groupIds, text));
+  WA_SEND_QUEUE = job.catch(() => {});
+  return job;
+}
+
+async function doSendAlertToGroups(groupIds, text) {
   const ids = Array.isArray(groupIds) ? groupIds.join(",") : groupIds;
   const env = {
     ...process.env,
@@ -879,17 +889,19 @@ async function sendAlertToGroups(groupIds, text) {
     WA_ALERT_MESSAGE: text,
   };
   await new Promise((resolve, reject) => {
+    // detached => own process group, so the timeout kill reaches Chromium too
     const child = spawn("npm", ["run", "wa:send:groups"], {
       cwd: root,
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     // Hard kill if the child wedges (hung Chromium): a send that never returns
     // leaves AUTO_SEND_RUNNING=true forever and silently stops all future alerts.
     let killedByTimeout = false;
     const killer = setTimeout(() => {
       killedByTimeout = true;
-      try { child.kill("SIGKILL"); } catch {}
+      try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
     }, 240000);
     let stderr = "";
     child.stdout.on("data", (d) => process.stdout.write(String(d)));
@@ -900,7 +912,7 @@ async function sendAlertToGroups(groupIds, text) {
     child.on("error", (err) => { clearTimeout(killer); reject(err); });
     child.on("close", (code) => {
       clearTimeout(killer);
-      if (killedByTimeout) return reject(new Error("wa:send:groups timeout (240s), proceso matado"));
+      if (killedByTimeout) return reject(new Error("wa:send:groups timeout (240s), árbol de procesos matado"));
       if (code === 0) resolve();
       else reject(new Error(stderr || `wa:send:groups exit ${code}`));
     });

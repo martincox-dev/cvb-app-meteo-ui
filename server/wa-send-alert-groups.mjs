@@ -70,8 +70,10 @@ const rootDir = process.cwd();
 // Watchdog global: este proceso NUNCA debe colgarse — el dispatcher del runtime
 // espera su salida y un cuelgue bloquea todos los ciclos de alertas siguientes.
 const WATCHDOG_MS = Number(process.env.WA_SEND_TIMEOUT_MS || 150000);
-const watchdog = setTimeout(() => {
+const watchdog = setTimeout(async () => {
   console.error(`Timeout global de envío tras ${WATCHDOG_MS} ms — abortando`);
+  // Close Chromium before exiting or it can outlive us holding the profile
+  try { await Promise.race([client.destroy(), new Promise((r) => setTimeout(r, 5000))]); } catch {}
   process.exit(4);
 }, WATCHDOG_MS);
 watchdog.unref();
