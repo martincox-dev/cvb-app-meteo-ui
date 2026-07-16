@@ -56,6 +56,10 @@ let LAST_AVAMET_BUNDLE = { around: [], primary: [], interpolation: null };
 let INTERPOLATED_SAMPLES = [];
 let AUTO_SEND_RUNNING = false;
 let LAST_AUTO_DISPATCH = { at: null, alerts_seen: 0, sent: 0, error: null };
+// Cap de reintentos por fingerprint: sin esto, un envío que entrega el mensaje
+// pero reporta fallo (p.ej. ack no confirmado) se reenvía en bucle infinito.
+const MAX_SEND_ATTEMPTS = 3;
+let SEND_ATTEMPTS = new Map();
 const SENT_ALERT_KEYS_FILE = join(root, "server", "sent-alert-keys.json");
 let SENT_ALERT_KEYS = new Set();
 const db = LIBSQL_URL && LIBSQL_AUTH_TOKEN
@@ -144,6 +148,13 @@ async function initDb() {
       phenomenon TEXT,
       valid_from TEXT,
       valid_to TEXT
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS alert_send_attempts (
+      alert_key TEXT PRIMARY KEY,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt INTEGER
     )
   `);
   await db.execute("CREATE INDEX IF NOT EXISTS idx_wind_samples_ts ON wind_samples(ts)");
@@ -870,6 +881,30 @@ async function saveSentAlertKeys() {
   }
 }
 
+async function loadSendAttempts() {
+  if (!db) return;
+  try {
+    const r = await db.execute("SELECT alert_key, attempts FROM alert_send_attempts");
+    SEND_ATTEMPTS = new Map((r.rows || []).map((row) => [String(row.alert_key), Number(row.attempts) || 0]));
+  } catch {
+    SEND_ATTEMPTS = new Map();
+  }
+}
+
+async function bumpSendAttempt(fp) {
+  const n = (SEND_ATTEMPTS.get(fp) || 0) + 1;
+  SEND_ATTEMPTS.set(fp, n);
+  if (db) {
+    try {
+      await db.execute({
+        sql: "INSERT OR REPLACE INTO alert_send_attempts (alert_key, attempts, last_attempt) VALUES (?, ?, ?)",
+        args: [fp, n, Date.now()],
+      });
+    } catch { /* memoria sigue valiendo */ }
+  }
+  return n;
+}
+
 // All WA sends share one Chromium profile: two concurrent send processes
 // (auto-dispatch + wa-test) deadlock each other. Serialize them.
 let WA_SEND_QUEUE = Promise.resolve();
@@ -945,6 +980,9 @@ async function autoDispatchAemetAlertsToGroups() {
       if (expiresTs && expiresTs < Date.now()) continue;
       const fp = alertFingerprint(alert);
       if (SENT_ALERT_KEYS.has(fp)) continue;
+      // Cap duro: nunca más de MAX_SEND_ATTEMPTS envíos por aviso, pase lo que pase
+      if ((SEND_ATTEMPTS.get(fp) || 0) >= MAX_SEND_ATTEMPTS) continue;
+      await bumpSendAttempt(fp);
       const text = formatAlertWhatsappText(alert);
       await sendAlertToConfiguredGroups(text);
       SENT_ALERT_KEYS.add(fp);
@@ -1284,6 +1322,7 @@ ${qrString
         if (alertRank(a.level) < 2) reason = "nivel_verde";
         else if (expiresTs && expiresTs < Date.now()) reason = "caducado";
         else if (SENT_ALERT_KEYS.has(fp)) reason = "ya_enviado";
+        else if ((SEND_ATTEMPTS.get(fp) || 0) >= MAX_SEND_ATTEMPTS) reason = "reintentos_agotados";
         const item = {
           fingerprint: fp,
           level: a.level,
@@ -1404,6 +1443,7 @@ async function startBackgroundLoops() {
   try {
     await initDb();
     await loadSentAlertKeys();
+    await loadSendAttempts();
   } catch (err) {
     console.error("init startup error:", err?.message || err);
   }

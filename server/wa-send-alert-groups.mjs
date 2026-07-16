@@ -106,9 +106,12 @@ client.on("ready", async () => {
   try {
     for (const groupId of GROUP_IDS) {
       const sent = await client.sendMessage(groupId, MESSAGE);
+      // El ack es SOLO informativo. Exigir ack>=1 para dar el envío por bueno
+      // provocó reenvíos en bucle: el mensaje llegaba al grupo pero el ack no
+      // volvía a tiempo (p.ej. móvil sin cobertura), el proceso salía con
+      // error y el dispatcher lo reintentaba cada ciclo (incidente 2026-07-15).
       let ack = sent?.ack ?? 0;
-      for (let i = 0; i < 10; i++) {
-        if (ack >= 1) break;
+      for (let i = 0; i < 5 && ack < 1; i++) {
         await new Promise((r) => setTimeout(r, 1200));
         try {
           const chat = await client.getChatById(groupId);
@@ -116,16 +119,17 @@ client.on("ready", async () => {
           const hit = recent.find((m) => m.id?._serialized === sent?.id?._serialized);
           ack = hit?.ack ?? ack;
         } catch {
-          // retry loop continues
+          // informativo, seguimos
         }
       }
       results.push({ groupId, messageId: sent?.id?._serialized, ack });
       console.log(`Enviado ${groupId} ack=${ack} id=${sent?.id?._serialized}`);
     }
     await client.destroy();
-    const failed = results.filter((r) => r.ack < 1);
+    // Éxito = sendMessage devolvió id de mensaje para todos los grupos
+    const failed = results.filter((r) => !r.messageId);
     if (failed.length) {
-      console.error("Algunos envíos no alcanzaron ack>=1", failed);
+      console.error("sendMessage sin id de mensaje en:", failed.map((f) => f.groupId).join(","));
       process.exit(2);
     }
     try {
@@ -136,6 +140,7 @@ client.on("ready", async () => {
     process.exit(0);
   } catch (err) {
     console.error("Error envío grupos:", err?.message || err);
+    try { await client.destroy(); } catch {}
     process.exit(3);
   }
 });
