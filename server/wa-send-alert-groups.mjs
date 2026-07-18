@@ -141,6 +141,17 @@ client.on("ready", async () => {
         }
       }
       if (sendError && !verified) console.error(`sendMessage lanzó error en ${groupId}:`, sendError?.message || sendError);
+      if (!verified) {
+        // Diagnóstico: qué hay realmente en el chat para comparar con lo esperado
+        try {
+          const chat = await client.getChatById(groupId);
+          const recent = await chat.fetchMessages({ limit: 6 });
+          const mine = recent.filter((m) => m.fromMe).map((m) => normText(m.body).slice(0, 90));
+          console.error(`no verificado en ${groupId} · esperado[0..90]=${JSON.stringify(targetText.slice(0, 90))} · fromMe recientes=${JSON.stringify(mine)}`);
+        } catch (e) {
+          console.error(`no verificado en ${groupId} y el dump de chat falló:`, e?.message || e);
+        }
+      }
       results.push({ groupId, messageId, ack, verified });
       console.log(`Enviado ${groupId} verificado=${verified} ack=${ack} id=${messageId}`);
     }
