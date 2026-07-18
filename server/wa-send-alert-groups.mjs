@@ -105,31 +105,44 @@ client.on("ready", async () => {
   const results = [];
   try {
     for (const groupId of GROUP_IDS) {
-      const sent = await client.sendMessage(groupId, MESSAGE);
-      // El ack es SOLO informativo. Exigir ack>=1 para dar el envío por bueno
-      // provocó reenvíos en bucle: el mensaje llegaba al grupo pero el ack no
-      // volvía a tiempo (p.ej. móvil sin cobertura), el proceso salía con
-      // error y el dispatcher lo reintentaba cada ciclo (incidente 2026-07-15).
+      // NINGÚN valor devuelto por la librería es fiable como criterio de éxito:
+      // - ack no confirmado con el móvil sin cobertura (incidente 2026-07-15)
+      // - sendMessage devuelve Message vacío con id=undefined aunque el
+      //   mensaje SÍ sale (incidente 2026-07-18, wweb.js 1.34 vs WA Web actual)
+      // Éxito = verificar en el propio chat que nuestro mensaje está ahí.
+      let sent = null;
+      let sendError = null;
+      try {
+        sent = await client.sendMessage(groupId, MESSAGE);
+      } catch (e) {
+        sendError = e;
+      }
+      let messageId = sent?.id?._serialized || null;
       let ack = sent?.ack ?? 0;
-      for (let i = 0; i < 5 && ack < 1; i++) {
-        await new Promise((r) => setTimeout(r, 1200));
+      let verified = Boolean(messageId);
+      for (let i = 0; i < 6 && !verified; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
         try {
           const chat = await client.getChatById(groupId);
-          const recent = await chat.fetchMessages({ limit: 20 });
-          const hit = recent.find((m) => m.id?._serialized === sent?.id?._serialized);
-          ack = hit?.ack ?? ack;
+          const recent = await chat.fetchMessages({ limit: 10 });
+          const hit = recent.find((m) => m.fromMe && String(m.body || "") === MESSAGE);
+          if (hit) {
+            verified = true;
+            messageId = hit.id?._serialized || messageId;
+            ack = hit.ack ?? ack;
+          }
         } catch {
-          // informativo, seguimos
+          // seguimos intentando verificar
         }
       }
-      results.push({ groupId, messageId: sent?.id?._serialized, ack });
-      console.log(`Enviado ${groupId} ack=${ack} id=${sent?.id?._serialized}`);
+      if (sendError && !verified) console.error(`sendMessage lanzó error en ${groupId}:`, sendError?.message || sendError);
+      results.push({ groupId, messageId, ack, verified });
+      console.log(`Enviado ${groupId} verificado=${verified} ack=${ack} id=${messageId}`);
     }
     await client.destroy();
-    // Éxito = sendMessage devolvió id de mensaje para todos los grupos
-    const failed = results.filter((r) => !r.messageId);
+    const failed = results.filter((r) => !r.verified);
     if (failed.length) {
-      console.error("sendMessage sin id de mensaje en:", failed.map((f) => f.groupId).join(","));
+      console.error("sin verificación de entrega en:", failed.map((f) => f.groupId).join(","));
       process.exit(2);
     }
     try {
