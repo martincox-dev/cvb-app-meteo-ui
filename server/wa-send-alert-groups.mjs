@@ -120,12 +120,17 @@ client.on("ready", async () => {
       let messageId = sent?.id?._serialized || null;
       let ack = sent?.ack ?? 0;
       let verified = Boolean(messageId);
+      // Igualdad sobre texto normalizado: inmune a \r\n y espacios fantasma que
+      // WhatsApp pueda introducir, pero SIN relajar a prefijos/fragmentos — un
+      // aviso anterior en el historial nunca debe verificar un envío nuevo.
+      const normText = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const targetText = normText(MESSAGE);
       for (let i = 0; i < 6 && !verified; i++) {
         await new Promise((r) => setTimeout(r, 1500));
         try {
           const chat = await client.getChatById(groupId);
           const recent = await chat.fetchMessages({ limit: 10 });
-          const hit = recent.find((m) => m.fromMe && String(m.body || "") === MESSAGE);
+          const hit = recent.find((m) => m.fromMe && normText(m.body) === targetText);
           if (hit) {
             verified = true;
             messageId = hit.id?._serialized || messageId;

@@ -982,30 +982,37 @@ async function autoDispatchAemetAlertsToGroups() {
       if (SENT_ALERT_KEYS.has(fp)) continue;
       // Cap duro: nunca más de MAX_SEND_ATTEMPTS envíos por aviso, pase lo que pase
       if ((SEND_ATTEMPTS.get(fp) || 0) >= MAX_SEND_ATTEMPTS) continue;
-      await bumpSendAttempt(fp);
-      const text = formatAlertWhatsappText(alert);
-      await sendAlertToConfiguredGroups(text);
-      SENT_ALERT_KEYS.add(fp);
-      LAST_AUTO_DISPATCH.sent += 1;
-      if (db) {
-        await db.execute({
-          sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          args: [
-            fp,
-            Date.now(),
-            String(alert.area || ""),
-            String(alert.level || ""),
-            String(alert.phenomenon || ""),
-            String(alert.validFrom || ""),
-            String(alert.validTo || ""),
-          ],
-        });
-        await db.execute({
-          sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
-          args: [Date.now() - SAMPLE_RETENTION_MS],
-        });
+      // Cada aviso se despacha de forma independiente: un fallo en uno no debe
+      // impedir que los demás avisos del mismo ciclo intenten salir.
+      try {
+        await bumpSendAttempt(fp);
+        const text = formatAlertWhatsappText(alert);
+        await sendAlertToConfiguredGroups(text);
+        SENT_ALERT_KEYS.add(fp);
+        LAST_AUTO_DISPATCH.sent += 1;
+        if (db) {
+          await db.execute({
+            sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              fp,
+              Date.now(),
+              String(alert.area || ""),
+              String(alert.level || ""),
+              String(alert.phenomenon || ""),
+              String(alert.validFrom || ""),
+              String(alert.validTo || ""),
+            ],
+          });
+          await db.execute({
+            sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
+            args: [Date.now() - SAMPLE_RETENTION_MS],
+          });
+        }
+        await saveSentAlertKeys();
+      } catch (alertErr) {
+        console.error(`fallo despachando aviso ${fp}:`, alertErr?.message || alertErr);
+        LAST_AUTO_DISPATCH.error = `aviso ${fp.slice(0, 60)}: ${String(alertErr?.message || alertErr).slice(0, 200)}`;
       }
-      await saveSentAlertKeys();
     }
   } catch (err) {
     console.error("autoDispatchAemetAlertsToGroups error:", err?.message || err);
@@ -1202,7 +1209,17 @@ ${qrString
         return json(res, 400, { ok: false, error: "WA_GROUP_IDS no configurado" });
       }
       json(res, 202, { ok: true, status: "sending", sent_to: juntaId });
-      sendAlertToGroups(juntaId, "🧪 Prueba técnica meteo CVB — sistema OK")
+      // Mensaje multilínea con el mismo formato que un aviso real, para que el
+      // test ejercite la verificación por lectura de chat en las mismas
+      // condiciones que un envío de producción (saltos de línea, emojis, hora).
+      const testText = [
+        "🧪 Prueba técnica meteo CVB",
+        `📍 Zona: Litoral sur de Castellón`,
+        `🕒 ${formatMadridDateTime(new Date().toISOString())}`,
+        "",
+        "Sistema de alertas operativo.",
+      ].join("\n");
+      sendAlertToGroups(juntaId, testText)
         .then(() => console.log(`wa-test OK -> ${juntaId}`))
         .catch((err) => console.error(`wa-test ERROR: ${err?.message || err}`));
       return;
