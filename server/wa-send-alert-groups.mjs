@@ -152,13 +152,22 @@ client.on("ready", async () => {
           console.error(`no verificado en ${groupId} y el dump de chat falló:`, e?.message || e);
         }
       }
-      results.push({ groupId, messageId, ack, verified });
-      console.log(`Enviado ${groupId} verificado=${verified} ack=${ack} id=${messageId}`);
+      const status = verified ? "confirmed" : (sendError ? "failed" : "unconfirmed");
+      results.push({
+        groupId,
+        messageId,
+        ack,
+        verified,
+        status,
+        error: sendError ? String(sendError?.message || sendError) : null,
+      });
+      console.log(`Enviado ${groupId} estado=${status} verificado=${verified} ack=${ack} id=${messageId}`);
     }
     await client.destroy();
-    const failed = results.filter((r) => !r.verified);
+    console.log(`WA_SEND_RESULT ${JSON.stringify({ results })}`);
+    const failed = results.filter((r) => r.status === "failed");
     if (failed.length) {
-      console.error("sin verificación de entrega en:", failed.map((f) => f.groupId).join(","));
+      console.error("envío fallido en:", failed.map((f) => f.groupId).join(","));
       process.exit(2);
     }
     try {

@@ -65,6 +65,7 @@ let SENT_ALERT_KEYS = new Set();
 const db = LIBSQL_URL && LIBSQL_AUTH_TOKEN
   ? createClient({ url: LIBSQL_URL, authToken: LIBSQL_AUTH_TOKEN })
   : null;
+const WA_SEND_RESULT_PREFIX = "WA_SEND_RESULT ";
 
 const toKn = (ms) => (typeof ms === "number" ? +(ms * 1.943844).toFixed(1) : null);
 const kmhToKn = (kmh) => (typeof kmh === "number" ? +(kmh * 0.539957).toFixed(1) : null);
@@ -157,8 +158,23 @@ async function initDb() {
       last_attempt INTEGER
     )
   `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS alert_dispatch_targets (
+      dispatch_key TEXT PRIMARY KEY,
+      alert_key TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      area TEXT,
+      level TEXT,
+      phenomenon TEXT,
+      valid_from TEXT,
+      valid_to TEXT
+    )
+  `);
   await db.execute("CREATE INDEX IF NOT EXISTS idx_wind_samples_ts ON wind_samples(ts)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_dispatches_sent_at ON alert_dispatches(sent_at)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_dispatch_targets_sent_at ON alert_dispatch_targets(sent_at)");
 }
 
 function getTag(xml, tag) {
@@ -849,15 +865,33 @@ function formatAlertWhatsappText(alert) {
   ].join("\n");
 }
 
+function splitGroupIds(raw = WA_GROUP_IDS) {
+  return String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function targetDispatchKey(alertKey, groupId) {
+  return `${alertKey}@@${String(groupId || "").trim()}`;
+}
+
 async function loadSentAlertKeys() {
   if (db) {
     try {
-      const rowsRes = await db.execute("SELECT alert_key FROM alert_dispatches ORDER BY sent_at ASC LIMIT 5000");
-      const keys = (rowsRes.rows || []).map((r) => String(r.alert_key)).filter(Boolean);
+      const rowsRes = await db.execute("SELECT dispatch_key FROM alert_dispatch_targets ORDER BY sent_at ASC LIMIT 10000");
+      const keys = (rowsRes.rows || []).map((r) => String(r.dispatch_key)).filter(Boolean);
       SENT_ALERT_KEYS = new Set(keys);
       return;
     } catch {
-      SENT_ALERT_KEYS = new Set();
+      try {
+        const rowsRes = await db.execute("SELECT alert_key FROM alert_dispatches ORDER BY sent_at ASC LIMIT 5000");
+        const keys = (rowsRes.rows || []).map((r) => String(r.alert_key)).filter(Boolean);
+        SENT_ALERT_KEYS = new Set(keys);
+        return;
+      } catch {
+        SENT_ALERT_KEYS = new Set();
+      }
     }
   }
   try {
@@ -924,6 +958,8 @@ async function doSendAlertToGroups(groupIds, text) {
     WA_ALERT_MESSAGE: text,
   };
   await new Promise((resolve, reject) => {
+    let parsedResult = null;
+    let stdout = "";
     // detached => own process group, so the timeout kill reaches Chromium too
     const child = spawn("npm", ["run", "wa:send:groups"], {
       cwd: root,
@@ -939,7 +975,21 @@ async function doSendAlertToGroups(groupIds, text) {
       try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
     }, 480000);
     let stderr = "";
-    child.stdout.on("data", (d) => process.stdout.write(String(d)));
+    child.stdout.on("data", (d) => {
+      const chunk = String(d);
+      stdout += chunk;
+      process.stdout.write(chunk);
+      const lines = stdout.split(/\r?\n/);
+      stdout = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith(WA_SEND_RESULT_PREFIX)) continue;
+        try {
+          parsedResult = JSON.parse(line.slice(WA_SEND_RESULT_PREFIX.length));
+        } catch {
+          // ignore malformed marker, stderr/exit code still decide
+        }
+      }
+    });
     child.stderr.on("data", (d) => {
       stderr += String(d);
       process.stderr.write(String(d));
@@ -948,8 +998,19 @@ async function doSendAlertToGroups(groupIds, text) {
     child.on("close", (code) => {
       clearTimeout(killer);
       if (killedByTimeout) return reject(new Error("wa:send:groups timeout (240s), árbol de procesos matado"));
-      if (code === 0) resolve();
-      else reject(new Error(stderr || `wa:send:groups exit ${code}`));
+      if (stdout.startsWith(WA_SEND_RESULT_PREFIX)) {
+        try {
+          parsedResult = JSON.parse(stdout.slice(WA_SEND_RESULT_PREFIX.length));
+        } catch {
+          // ignore trailing malformed marker
+        }
+      }
+      if (code === 0) resolve(parsedResult || { results: [] });
+      else {
+        const err = new Error(stderr || `wa:send:groups exit ${code}`);
+        err.sendResult = parsedResult || { results: [] };
+        reject(err);
+      }
     });
   });
 }
@@ -972,6 +1033,11 @@ async function autoDispatchAemetAlertsToGroups() {
     const alerts = [...byFp.values()].sort((a, b) => alertRank(b.level) - alertRank(a.level));
     LAST_AUTO_DISPATCH = { at: new Date().toISOString(), alerts_seen: alerts.length, sent: 0, error: null };
     if (!alerts.length) return;
+    const groupIds = splitGroupIds();
+    if (!groupIds.length) {
+      LAST_AUTO_DISPATCH.error = "WA_GROUP_IDS no configurado";
+      return;
+    }
 
     for (const alert of alerts) {
       // Never relay verde/unknown levels or already-expired avisos
@@ -979,39 +1045,66 @@ async function autoDispatchAemetAlertsToGroups() {
       const expiresTs = new Date(alert.validTo || 0).getTime();
       if (expiresTs && expiresTs < Date.now()) continue;
       const fp = alertFingerprint(alert);
-      if (SENT_ALERT_KEYS.has(fp)) continue;
-      // Cap duro: nunca más de MAX_SEND_ATTEMPTS envíos por aviso, pase lo que pase
-      if ((SEND_ATTEMPTS.get(fp) || 0) >= MAX_SEND_ATTEMPTS) continue;
-      // Cada aviso se despacha de forma independiente: un fallo en uno no debe
-      // impedir que los demás avisos del mismo ciclo intenten salir.
-      try {
-        await bumpSendAttempt(fp);
-        const text = formatAlertWhatsappText(alert);
-        await sendAlertToConfiguredGroups(text);
-        SENT_ALERT_KEYS.add(fp);
-        LAST_AUTO_DISPATCH.sent += 1;
-        if (db) {
-          await db.execute({
-            sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            args: [
-              fp,
-              Date.now(),
-              String(alert.area || ""),
-              String(alert.level || ""),
-              String(alert.phenomenon || ""),
-              String(alert.validFrom || ""),
-              String(alert.validTo || ""),
-            ],
-          });
-          await db.execute({
-            sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
-            args: [Date.now() - SAMPLE_RETENTION_MS],
-          });
+      const text = formatAlertWhatsappText(alert);
+      for (const groupId of groupIds) {
+        const dispatchKey = targetDispatchKey(fp, groupId);
+        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) continue;
+        // Cap duro por aviso y por grupo: un grupo que falla no fuerza reenvíos al otro.
+        if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) continue;
+        try {
+          await bumpSendAttempt(dispatchKey);
+          const sendResult = await sendAlertToGroups(groupId, text);
+          const groupResult = Array.isArray(sendResult?.results)
+            ? sendResult.results.find((r) => String(r.groupId || "") === groupId)
+            : null;
+          const status = String(groupResult?.status || "confirmed");
+          if (status === "failed") {
+            throw new Error(groupResult?.error || `envío fallido a ${groupId}`);
+          }
+          SENT_ALERT_KEYS.add(dispatchKey);
+          LAST_AUTO_DISPATCH.sent += 1;
+          if (db) {
+            await db.execute({
+              sql: `INSERT OR REPLACE INTO alert_dispatch_targets (dispatch_key, alert_key, group_id, status, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              args: [
+                dispatchKey,
+                fp,
+                groupId,
+                status,
+                Date.now(),
+                String(alert.area || ""),
+                String(alert.level || ""),
+                String(alert.phenomenon || ""),
+                String(alert.validFrom || ""),
+                String(alert.validTo || ""),
+              ],
+            });
+            await db.execute({
+              sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              args: [
+                fp,
+                Date.now(),
+                String(alert.area || ""),
+                String(alert.level || ""),
+                String(alert.phenomenon || ""),
+                String(alert.validFrom || ""),
+                String(alert.validTo || ""),
+              ],
+            });
+            await db.execute({
+              sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
+              args: [Date.now() - SAMPLE_RETENTION_MS],
+            });
+            await db.execute({
+              sql: `DELETE FROM alert_dispatch_targets WHERE sent_at < ?`,
+              args: [Date.now() - SAMPLE_RETENTION_MS],
+            });
+          }
+          await saveSentAlertKeys();
+        } catch (alertErr) {
+          console.error(`fallo despachando aviso ${fp} al grupo ${groupId}:`, alertErr?.message || alertErr);
+          LAST_AUTO_DISPATCH.error = `aviso ${fp.slice(0, 40)} grupo ${groupId.slice(0, 24)}: ${String(alertErr?.message || alertErr).slice(0, 160)}`;
         }
-        await saveSentAlertKeys();
-      } catch (alertErr) {
-        console.error(`fallo despachando aviso ${fp}:`, alertErr?.message || alertErr);
-        LAST_AUTO_DISPATCH.error = `aviso ${fp.slice(0, 60)}: ${String(alertErr?.message || alertErr).slice(0, 200)}`;
       }
     }
   } catch (err) {
