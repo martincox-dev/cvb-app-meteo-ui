@@ -1424,6 +1424,7 @@ ${qrString
         const fp = alertFingerprint(a);
         if (!byFp.has(fp)) byFp.set(fp, a);
       }
+      const groupIds = splitGroupIds();
       const wouldSend = [];
       const skipped = [];
       for (const [fp, a] of byFp) {
@@ -1431,8 +1432,7 @@ ${qrString
         const expiresTs = new Date(a.validTo || 0).getTime();
         if (alertRank(a.level) < 2) reason = "nivel_verde";
         else if (expiresTs && expiresTs < Date.now()) reason = "caducado";
-        else if (SENT_ALERT_KEYS.has(fp)) reason = "ya_enviado";
-        else if ((SEND_ATTEMPTS.get(fp) || 0) >= MAX_SEND_ATTEMPTS) reason = "reintentos_agotados";
+        else if (!groupIds.length) reason = "sin_grupos_configurados";
         const item = {
           fingerprint: fp,
           level: a.level,
@@ -1443,8 +1443,56 @@ ${qrString
           validTo: a.validTo,
           source: a.source,
         };
-        if (reason) skipped.push({ ...item, reason });
-        else wouldSend.push({ ...item, message: formatAlertWhatsappText(a) });
+        if (reason) {
+          skipped.push({ ...item, reason });
+          continue;
+        }
+
+        const sentGroups = [];
+        const exhaustedGroups = [];
+        const pendingGroups = [];
+        for (const groupId of groupIds) {
+          const dispatchKey = targetDispatchKey(fp, groupId);
+          if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) {
+            sentGroups.push(groupId);
+          } else if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) {
+            exhaustedGroups.push(groupId);
+          } else {
+            pendingGroups.push(groupId);
+          }
+        }
+
+        if (pendingGroups.length) {
+          wouldSend.push({
+            ...item,
+            message: formatAlertWhatsappText(a),
+            target_groups: pendingGroups,
+            already_sent_groups: sentGroups,
+            exhausted_groups: exhaustedGroups,
+          });
+          continue;
+        }
+
+        if (exhaustedGroups.length && sentGroups.length) {
+          skipped.push({
+            ...item,
+            reason: "parcialmente_enviado",
+            sent_groups: sentGroups,
+            exhausted_groups: exhaustedGroups,
+          });
+        } else if (exhaustedGroups.length) {
+          skipped.push({
+            ...item,
+            reason: "reintentos_agotados",
+            exhausted_groups: exhaustedGroups,
+          });
+        } else {
+          skipped.push({
+            ...item,
+            reason: "ya_enviado",
+            sent_groups: sentGroups,
+          });
+        }
       }
       return json(res, 200, {
         ok: true,
