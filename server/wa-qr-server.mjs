@@ -1,5 +1,5 @@
 import { writeFile, unlink } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { rmSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { backupWaSessionToStorage } from "./wa-session-storage.mjs";
 
@@ -19,9 +19,15 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const QR_FILE = process.env.WA_QR_FILE || "/tmp/wa-pending-qr.txt";
+const rootDir = process.cwd();
+
+// Same persistent-volume detection as wa-send-alert-groups.mjs — must match
+// exactly, both scripts read/write the same session directory.
+const WA_VOLUME_PATH = "/data/wa-session";
+const WA_DATA_DIR = process.env.WA_DATA_DIR || (existsSync(WA_VOLUME_PATH) ? WA_VOLUME_PATH : `${rootDir}/.wwebjs_auth`);
 
 const client = new Client({
-  authStrategy: new LocalAuth({ clientId: CLIENT_ID }),
+  authStrategy: new LocalAuth({ clientId: CLIENT_ID, dataPath: WA_DATA_DIR }),
   puppeteer: {
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -50,7 +56,7 @@ client.on("ready", async () => {
   // (files change mid-compression). The session on disk survives destroy().
   try { await client.destroy(); } catch {}
   try {
-    const r = await backupWaSessionToStorage(process.cwd());
+    const r = await backupWaSessionToStorage(WA_DATA_DIR, rootDir);
     console.log(`Sesión guardada en Bunny Storage OK (${r?.bytes || "?"} bytes)`);
     process.exit(0);
   } catch (e) {
@@ -72,12 +78,13 @@ client.on("disconnected", (reason) => {
 // Fresh link on purpose: do NOT restore the stored session. If start-qr is
 // being called it's because that session is dead, and initializing with a
 // logged-out session fires "disconnected: LOGOUT" and kills this process
-// before any QR is generated.
+// before any QR is generated. Wipes the persistent volume's copy too — a
+// broken session must not survive a re-link.
 try {
-  rmSync(`${process.cwd()}/.wwebjs_auth/session-${CLIENT_ID}`, { recursive: true, force: true });
+  rmSync(`${WA_DATA_DIR}/session-${CLIENT_ID}`, { recursive: true, force: true });
 } catch {}
 try {
-  rmSync(`${process.cwd()}/.wwebjs_cache`, { recursive: true, force: true });
+  rmSync(`${rootDir}/.wwebjs_cache`, { recursive: true, force: true });
 } catch {}
 
 // Watchdog: if nobody scans in 10 min, free the Chromium instead of lingering

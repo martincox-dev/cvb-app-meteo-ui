@@ -22,6 +22,12 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const HEADLESS = (process.env.WA_HEADLESS || "true") !== "false";
+
+// Persistent volume (Bunny MC, mounted 2026-08-18) survives restarts and
+// redeploys, unlike the rest of the container disk. Falls back to the old
+// project-relative path for local dev where the volume doesn't exist.
+const WA_VOLUME_PATH = "/data/wa-session";
+const WA_DATA_DIR = process.env.WA_DATA_DIR || (fs.existsSync(WA_VOLUME_PATH) ? WA_VOLUME_PATH : `${process.cwd()}/.wwebjs_auth`);
 const GROUP_IDS_ENV = (process.env.WA_GROUP_IDS || "").trim();
 const MESSAGE = (process.env.WA_ALERT_MESSAGE || "").trim();
 
@@ -56,7 +62,7 @@ if (!MESSAGE) {
 }
 
 const client = new Client({
-  authStrategy: new LocalAuth({ clientId: CLIENT_ID }),
+  authStrategy: new LocalAuth({ clientId: CLIENT_ID, dataPath: WA_DATA_DIR }),
   puppeteer: {
     headless: HEADLESS,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -171,7 +177,7 @@ client.on("ready", async () => {
       process.exit(2);
     }
     try {
-      await backupWaSessionToStorage(rootDir);
+      await backupWaSessionToStorage(WA_DATA_DIR, rootDir);
     } catch (e) {
       console.error("backup sesión WA warning:", e?.message || e);
     }
@@ -183,14 +189,16 @@ client.on("ready", async () => {
   }
 });
 
-// Keep an existing local session: it may hold sync progress from previous
-// attempts (or a fresher state than the remote snapshot). Only restore from
-// storage when there is no local session at all (fresh container).
-if (fs.existsSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}`)) {
-  console.log("usando sesión local existente (sin restore)");
+// On the persistent volume the session directory survives restarts, so this
+// almost always finds an existing session and skips the restore entirely —
+// no more re-download+extract (and its corruption risk) on every single send.
+// Bunny Storage restore is now only a bootstrap fallback for a fresh/empty
+// volume (or the local-dev path, which has no volume at all).
+if (fs.existsSync(`${WA_DATA_DIR}/session-${CLIENT_ID}`)) {
+  console.log(`usando sesión existente en ${WA_DATA_DIR} (sin restore)`);
 } else {
   try {
-    const restored = await restoreWaSessionFromStorage(rootDir);
+    const restored = await restoreWaSessionFromStorage(WA_DATA_DIR, rootDir);
     console.log("restore WA session:", JSON.stringify(restored));
   } catch (e) {
     console.error("restore sesión WA warning:", e?.message || e);
@@ -199,14 +207,14 @@ if (fs.existsSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}`)) {
 
 // Remove stale SingletonLock left by a previous Chromium process
 try {
-  fs.rmSync(`${rootDir}/.wwebjs_auth/session-${CLIENT_ID}/SingletonLock`);
+  fs.rmSync(`${WA_DATA_DIR}/session-${CLIENT_ID}/SingletonLock`);
 } catch {}
 
 // Mark the profile as cleanly exited. A profile restored with exit_type=Crashed
 // makes Chromium re-open the old WhatsApp Web tabs, and whatsapp-web.js then
 // fails to inject ("page binding onQRChangedEvent already exists").
 try {
-  const prefsPath = `${rootDir}/.wwebjs_auth/session-${CLIENT_ID}/Default/Preferences`;
+  const prefsPath = `${WA_DATA_DIR}/session-${CLIENT_ID}/Default/Preferences`;
   const prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
   if (prefs.profile) {
     prefs.profile.exit_type = "Normal";

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, rm, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, rm, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 const STORAGE_HOST = process.env.BUNNY_STORAGE_HOST || "storage.bunnycdn.com";
@@ -25,17 +25,30 @@ function run(cmd, args, cwd = process.cwd()) {
 }
 
 // Per-process temp path: QR server and send script can run at the same time
-// and must not clobber each other's tarball.
-function tempTarPath(rootDir) {
-  return `${rootDir}/.tmp/wa-session-${process.pid}.tgz`;
+// and must not clobber each other's tarball. Staged on the ephemeral project
+// dir, never on the persistent volume (no need for it to survive a restart).
+function tempTarPath(scratchDir) {
+  return `${scratchDir}/.tmp/wa-session-${process.pid}.tgz`;
 }
 
-async function verifyTgz(tarPath, rootDir) {
+async function verifyTgz(tarPath, scratchDir) {
   // Full archive listing fails on any truncated gzip stream or tar entry
-  await run("tar", ["-tzf", tarPath], rootDir);
+  await run("tar", ["-tzf", tarPath], scratchDir);
 }
 
-export async function restoreWaSessionFromStorage(rootDir) {
+// Empties dataDir's contents without removing dataDir itself — if dataDir is
+// a volume mount point, rm-ing the directory entry itself is best avoided.
+async function clearDirContents(dataDir) {
+  const entries = await readdir(dataDir).catch(() => []);
+  await Promise.all(entries.map((e) => rm(`${dataDir}/${e}`, { recursive: true, force: true })));
+}
+
+/**
+ * @param {string} dataDir - directory whose contents ARE the WA session
+ *   (e.g. the persistent volume mount, or a local ./.wwebjs_auth fallback)
+ * @param {string} scratchDir - ephemeral dir to stage the temp tarball in
+ */
+export async function restoreWaSessionFromStorage(dataDir, scratchDir = process.cwd()) {
   if (!hasStorageConfig()) return { ok: false, skipped: true, reason: "missing_storage_config" };
   const url = `https://${STORAGE_HOST}/${STORAGE_ZONE}/${STORAGE_OBJECT}`;
   const res = await fetch(url, {
@@ -45,40 +58,36 @@ export async function restoreWaSessionFromStorage(rootDir) {
   if (res.status === 404) return { ok: false, skipped: true, reason: "no_remote_snapshot" };
   if (!res.ok) throw new Error(`restore GET failed: HTTP ${res.status}`);
   const data = Buffer.from(await res.arrayBuffer());
-  await mkdir(`${rootDir}/.tmp`, { recursive: true });
-  const tarPath = tempTarPath(rootDir);
+  await mkdir(`${scratchDir}/.tmp`, { recursive: true });
+  const tarPath = tempTarPath(scratchDir);
   await writeFile(tarPath, data);
 
   // Verify BEFORE wiping the local session: a truncated download must never
   // leave us with neither remote nor local session.
   try {
-    await verifyTgz(tarPath, rootDir);
+    await verifyTgz(tarPath, scratchDir);
   } catch (e) {
     await rm(tarPath, { force: true });
     throw new Error(`snapshot corrupto, se conserva la sesión local: ${e?.message || e}`);
   }
 
-  await rm(`${rootDir}/.wwebjs_auth`, { recursive: true, force: true });
-  await rm(`${rootDir}/.wwebjs_cache`, { recursive: true, force: true });
-  await run("tar", ["-xzf", tarPath, "-C", rootDir], rootDir);
+  await mkdir(dataDir, { recursive: true });
+  await clearDirContents(dataDir);
+  await run("tar", ["-xzf", tarPath, "-C", dataDir], scratchDir);
   await rm(tarPath, { force: true });
   return { ok: true, restored: true };
 }
 
-export async function backupWaSessionToStorage(rootDir) {
+export async function backupWaSessionToStorage(dataDir, scratchDir = process.cwd()) {
   if (!hasStorageConfig()) return { ok: false, skipped: true, reason: "missing_storage_config" };
-  const hasAuth = existsSync(`${rootDir}/.wwebjs_auth`);
-  const hasCache = existsSync(`${rootDir}/.wwebjs_cache`);
-  if (!hasAuth && !hasCache) return { ok: false, skipped: true, reason: "no_local_session" };
+  const entries = await readdir(dataDir).catch(() => []);
+  if (!entries.length) return { ok: false, skipped: true, reason: "no_local_session" };
 
-  await mkdir(`${rootDir}/.tmp`, { recursive: true });
-  const tarPath = tempTarPath(rootDir);
-  const paths = [];
-  if (hasAuth) paths.push(".wwebjs_auth");
-  if (hasCache) paths.push(".wwebjs_cache");
-  await run("tar", ["-czf", tarPath, ...paths], rootDir);
+  await mkdir(`${scratchDir}/.tmp`, { recursive: true });
+  const tarPath = tempTarPath(scratchDir);
+  await run("tar", ["-czf", tarPath, "-C", dataDir, "."], scratchDir);
   // Never upload a broken archive (e.g. profile files changing mid-tar)
-  await verifyTgz(tarPath, rootDir);
+  await verifyTgz(tarPath, scratchDir);
   const body = await readFile(tarPath);
   const localSize = (await stat(tarPath)).size;
 
