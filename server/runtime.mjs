@@ -52,6 +52,12 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
 const SAMPLE_RETENTION_MS = 31 * 24 * 60 * 60 * 1000;
 const SAMPLE_INTERVAL_MS = 2 * 60 * 1000;
+// AVAMET blocks datacenter/cloud IPs (confirmed since 2026-07) and the
+// Bunny Storage cache it used to read from hasn't been refreshed since the
+// GitHub Actions proxy was disabled — every poll just fails and spams the
+// log. Off by default until AVAMET grants access or a working cache exists;
+// /api/status still probes it on demand (rare, useful signal, no spam).
+const AVAMET_POLL_ENABLED = String(process.env.AVAMET_POLL_ENABLED || "false").toLowerCase() === "true";
 let LAST_AVAMET_BUNDLE = { around: [], primary: [], interpolation: null };
 let INTERPOLATED_SAMPLES = [];
 let AUTO_SEND_RUNNING = false;
@@ -1605,9 +1611,13 @@ async function startBackgroundLoops() {
   } catch (err) {
     console.error("init startup error:", err?.message || err);
   }
-  pollInterpolatedSample();
+  if (AVAMET_POLL_ENABLED) {
+    pollInterpolatedSample();
+    setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
+  } else {
+    console.log("AVAMET polling desactivado (AVAMET_POLL_ENABLED=false) — ver /api/status para probar bajo demanda");
+  }
   autoDispatchAemetAlertsToGroups();
-  setInterval(pollInterpolatedSample, SAMPLE_INTERVAL_MS);
   setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
 }
 
