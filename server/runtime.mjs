@@ -270,7 +270,7 @@ function parseCapXmlToAlerts(xml) {
       alerts.push({
         id: `${identifier || "cap"}-${areaCode || Math.random().toString(36).slice(2, 8)}`,
         level,
-        levelLabel: severity || "Aviso",
+        levelLabel: `Aviso ${level}`,
         phenomenon: event || "Aviso meteorológico",
         area: areaDesc || "Castellón",
         areaCode,
