@@ -178,9 +178,25 @@ async function initDb() {
       valid_to TEXT
     )
   `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS alert_activity (
+      alert_key TEXT PRIMARY KEY,
+      first_seen INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      groups_sent TEXT,
+      groups_exhausted TEXT,
+      area TEXT,
+      level TEXT,
+      phenomenon TEXT,
+      valid_from TEXT,
+      valid_to TEXT
+    )
+  `);
   await db.execute("CREATE INDEX IF NOT EXISTS idx_wind_samples_ts ON wind_samples(ts)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_dispatches_sent_at ON alert_dispatches(sent_at)");
   await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_dispatch_targets_sent_at ON alert_dispatch_targets(sent_at)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_activity_last_seen ON alert_activity(last_seen)");
 }
 
 function getTag(xml, tag) {
@@ -559,25 +575,38 @@ function contentType(path) {
 }
 
 async function alertHistoryFromDb(limit = 30) {
-  // History = avisos this system actually dispatched (alert_dispatches table).
+  // History = every AEMET aviso the dispatcher has evaluated (alert_activity),
+  // whatever the outcome — an aviso that exhausted its 3 send attempts without
+  // ever reaching a group used to leave zero trace anywhere in the portal.
   // The opendata "archivo" endpoint is a multi-MB national tar capped at 2 days — not worth polling.
   if (!db) return [];
   try {
     const r = await db.execute({
-      sql: "SELECT alert_key, sent_at, area, level, phenomenon, valid_from, valid_to FROM alert_dispatches ORDER BY sent_at DESC LIMIT ?",
+      sql: "SELECT alert_key, last_seen, status, area, level, phenomenon, valid_from, valid_to FROM alert_activity ORDER BY last_seen DESC LIMIT ?",
       args: [limit],
     });
-    return (r.rows || []).map((row, i) => ({
-      id: String(row.alert_key || `hist-${i}`),
-      level: String(row.level || "amarillo"),
-      levelLabel: `Aviso ${String(row.level || "")}`.trim(),
-      phenomenon: String(row.phenomenon || "Aviso meteorológico"),
-      area: String(row.area || "Litoral sur de Castellón"),
-      description: `Aviso enviado a los grupos el ${formatMadridDateTime(new Date(Number(row.sent_at)))}`,
-      validFrom: String(row.valid_from || ""),
-      validTo: String(row.valid_to || ""),
-      source: "Historial CVB",
-    }));
+    const statusText = {
+      enviado: (t) => `Aviso enviado a los grupos el ${t}`,
+      parcial: (t) => `Aviso enviado solo a parte de los grupos (${t})`,
+      agotado: (t) => `Aviso NO entregado — se agotaron los reintentos el ${t}`,
+      pendiente: (t) => `Aviso pendiente de envío (visto por última vez el ${t})`,
+    };
+    return (r.rows || []).map((row, i) => {
+      const status = String(row.status || "pendiente");
+      const t = formatMadridDateTime(new Date(Number(row.last_seen)));
+      return {
+        id: String(row.alert_key || `hist-${i}`),
+        level: String(row.level || "amarillo"),
+        levelLabel: `Aviso ${String(row.level || "")}`.trim(),
+        phenomenon: String(row.phenomenon || "Aviso meteorológico"),
+        area: String(row.area || "Litoral sur de Castellón"),
+        description: (statusText[status] || statusText.pendiente)(t),
+        validFrom: String(row.valid_from || ""),
+        validTo: String(row.valid_to || ""),
+        source: "Historial CVB",
+        dispatchStatus: status,
+      };
+    });
   } catch {
     return [];
   }
@@ -1021,6 +1050,39 @@ async function doSendAlertToGroups(groupIds, text) {
   });
 }
 
+// Records EVERY alert the dispatcher evaluates, regardless of outcome — an
+// alert whose 3 attempts all fail (agotado) previously left no trace
+// anywhere, so it silently vanished from the portal's history too.
+async function recordAlertActivity(fp, alert, sentGroups, exhaustedGroups, totalGroups) {
+  if (!db) return;
+  const status = sentGroups.length === totalGroups
+    ? "enviado"
+    : sentGroups.length > 0
+      ? "parcial"
+      : exhaustedGroups.length === totalGroups
+        ? "agotado"
+        : "pendiente";
+  try {
+    const now = Date.now();
+    const prev = await db.execute({ sql: "SELECT first_seen FROM alert_activity WHERE alert_key = ?", args: [fp] });
+    const firstSeen = prev.rows?.[0]?.first_seen ?? now;
+    await db.execute({
+      sql: `INSERT OR REPLACE INTO alert_activity
+        (alert_key, first_seen, last_seen, status, groups_sent, groups_exhausted, area, level, phenomenon, valid_from, valid_to)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        fp, firstSeen, now, status,
+        sentGroups.join(","), exhaustedGroups.join(","),
+        String(alert.area || ""), String(alert.level || ""), String(alert.phenomenon || ""),
+        String(alert.validFrom || ""), String(alert.validTo || ""),
+      ],
+    });
+    await db.execute({ sql: "DELETE FROM alert_activity WHERE last_seen < ?", args: [now - SAMPLE_RETENTION_MS] });
+  } catch (e) {
+    console.error("recordAlertActivity error:", e?.message || e);
+  }
+}
+
 async function sendAlertToConfiguredGroups(text) {
   await sendAlertToGroups(WA_GROUP_IDS, text);
 }
@@ -1052,11 +1114,19 @@ async function autoDispatchAemetAlertsToGroups() {
       if (expiresTs && expiresTs < Date.now()) continue;
       const fp = alertFingerprint(alert);
       const text = formatAlertWhatsappText(alert);
+      const seenSentGroups = [];
+      const seenExhaustedGroups = [];
       for (const groupId of groupIds) {
         const dispatchKey = targetDispatchKey(fp, groupId);
-        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) continue;
+        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) {
+          seenSentGroups.push(groupId);
+          continue;
+        }
         // Cap duro por aviso y por grupo: un grupo que falla no fuerza reenvíos al otro.
-        if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) continue;
+        if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) {
+          seenExhaustedGroups.push(groupId);
+          continue;
+        }
         try {
           await bumpSendAttempt(dispatchKey);
           const sendResult = await sendAlertToGroups(groupId, text);
@@ -1068,6 +1138,7 @@ async function autoDispatchAemetAlertsToGroups() {
             throw new Error(groupResult?.error || `envío fallido a ${groupId}`);
           }
           SENT_ALERT_KEYS.add(dispatchKey);
+          seenSentGroups.push(groupId);
           LAST_AUTO_DISPATCH.sent += 1;
           if (db) {
             await db.execute({
@@ -1110,8 +1181,11 @@ async function autoDispatchAemetAlertsToGroups() {
         } catch (alertErr) {
           console.error(`fallo despachando aviso ${fp} al grupo ${groupId}:`, alertErr?.message || alertErr);
           LAST_AUTO_DISPATCH.error = `aviso ${fp.slice(0, 40)} grupo ${groupId.slice(0, 24)}: ${String(alertErr?.message || alertErr).slice(0, 160)}`;
+          // This failed attempt may have been the 3rd and last one for this group
+          if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) seenExhaustedGroups.push(groupId);
         }
       }
+      await recordAlertActivity(fp, alert, seenSentGroups, seenExhaustedGroups, groupIds.length);
     }
   } catch (err) {
     console.error("autoDispatchAemetAlertsToGroups error:", err?.message || err);

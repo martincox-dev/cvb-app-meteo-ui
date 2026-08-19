@@ -23,6 +23,11 @@ function AlertRow({ alert }) {
           <div className="flex flex-wrap items-center gap-2 mb-1">
             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.badge}`}>{alert.levelLabel}</span>
             <span className="text-xs font-medium text-foreground">{alert.phenomenon}</span>
+            {alert.dispatchStatus && alert.dispatchStatus !== "enviado" && (
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {alert.dispatchStatus === "agotado" ? "No entregado" : alert.dispatchStatus === "parcial" ? "Entrega parcial" : "Pendiente"}
+              </span>
+            )}
           </div>
           <p className="text-xs text-muted-foreground font-medium mb-0.5">{alert.area}</p>
           <p className="text-sm text-foreground leading-relaxed">{alert.description}</p>
