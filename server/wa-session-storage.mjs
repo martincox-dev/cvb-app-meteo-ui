@@ -75,11 +75,35 @@ export async function restoreWaSessionFromStorage(dataDir, scratchDir = process.
   await clearDirContents(dataDir);
   await run("tar", ["-xzf", tarPath, "-C", dataDir], scratchDir);
   await rm(tarPath, { force: true });
+
+  // Old-format snapshots (pre-volume era) nest the profile under literal
+  // ".wwebjs_auth"/".wwebjs_cache" instead of sitting flat in dataDir. If we
+  // just extracted one of those, promote its content up so LocalAuth (which
+  // only reads "session-<clientId>" directly under dataDir) actually finds it.
+  for (const legacyName of [".wwebjs_auth", ".wwebjs_cache"]) {
+    const legacyPath = `${dataDir}/${legacyName}`;
+    if (!existsSync(legacyPath)) continue;
+    const children = await readdir(legacyPath).catch(() => []);
+    for (const child of children) {
+      await rm(`${dataDir}/${child}`, { recursive: true, force: true }).catch(() => {});
+      await run("mv", [`${legacyPath}/${child}`, `${dataDir}/${child}`], scratchDir).catch(() => {});
+    }
+    await rm(legacyPath, { recursive: true, force: true }).catch(() => {});
+  }
+
   return { ok: true, restored: true };
 }
 
 export async function backupWaSessionToStorage(dataDir, scratchDir = process.cwd()) {
   if (!hasStorageConfig()) return { ok: false, skipped: true, reason: "missing_storage_config" };
+  // One-time cleanup: old-format remote snapshots (pre-volume era) stored
+  // the profile nested under literal ".wwebjs_auth"/".wwebjs_cache" names.
+  // A restore of one of those into the new flat dataDir leaves that nesting
+  // behind as dead weight (LocalAuth only ever reads "session-<clientId>"
+  // directly under dataDir) — strip it here so it never bloats a backup.
+  await rm(`${dataDir}/.wwebjs_auth`, { recursive: true, force: true }).catch(() => {});
+  await rm(`${dataDir}/.wwebjs_cache`, { recursive: true, force: true }).catch(() => {});
+
   const entries = await readdir(dataDir).catch(() => []);
   if (!entries.length) return { ok: false, skipped: true, reason: "no_local_session" };
 
