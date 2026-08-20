@@ -42,6 +42,11 @@ const WA_AUTO_SEND_ENABLED = String(process.env.WA_AUTO_SEND_ENABLED || "true").
 const WA_AUTO_SEND_INTERVAL_MS = Math.max(60000, Number(process.env.WA_AUTO_SEND_INTERVAL_MS || 180000));
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
 const WA_GROUP_IDS = process.env.WA_GROUP_IDS || "";
+// Separate target for the manual /api/whatsapp/wa-test button, decoupled from
+// WA_GROUP_IDS (the real auto-dispatch list) so testing never touches the
+// actual alert-recipient group(s). Falls back to the first WA_GROUP_IDS entry
+// if unset, so nothing breaks for anyone who hasn't set this yet.
+const WA_TEST_GROUP_ID = process.env.WA_TEST_GROUP_ID || WA_GROUP_IDS.split(",")[0]?.trim() || "";
 const LIBSQL_URL = process.env.LIBSQL_URL || "";
 const LIBSQL_AUTH_TOKEN = process.env.LIBSQL_AUTH_TOKEN || "";
 const BUNNY_STORAGE_HOST = process.env.BUNNY_STORAGE_HOST || "storage.bunnycdn.com";
@@ -1377,11 +1382,11 @@ ${qrString
     }
 
     if (url.pathname === "/api/whatsapp/wa-test") {
-      const juntaId = WA_GROUP_IDS.split(",")[0].trim();
-      if (!juntaId) {
-        return json(res, 400, { ok: false, error: "WA_GROUP_IDS no configurado" });
+      const testGroupId = WA_TEST_GROUP_ID;
+      if (!testGroupId) {
+        return json(res, 400, { ok: false, error: "WA_TEST_GROUP_ID (ni WA_GROUP_IDS) no configurado" });
       }
-      json(res, 202, { ok: true, status: "sending", sent_to: juntaId });
+      json(res, 202, { ok: true, status: "sending", sent_to: testGroupId });
       // Mensaje multilínea con el mismo formato que un aviso real, para que el
       // test ejercite la verificación por lectura de chat en las mismas
       // condiciones que un envío de producción (saltos de línea, emojis, hora).
@@ -1392,8 +1397,8 @@ ${qrString
         "",
         "Sistema de alertas operativo.",
       ].join("\n");
-      sendAlertToGroups(juntaId, testText)
-        .then(() => console.log(`wa-test OK -> ${juntaId}`))
+      sendAlertToGroups(testGroupId, testText)
+        .then(() => console.log(`wa-test OK -> ${testGroupId}`))
         .catch((err) => console.error(`wa-test ERROR: ${err?.message || err}`));
       return;
     }
