@@ -905,6 +905,117 @@ function formatAlertWhatsappText(alert) {
   ].join("\n");
 }
 
+// ── Formato agrupado: un mensaje por día, varios avisos dentro ──────────────
+// Sustituye al mensaje-por-aviso de arriba. AEMET publica los avisos del mismo
+// día en el mismo paquete CAP, así que llegan juntos en el mismo ciclo y se
+// pueden agrupar sin esperar a nada.
+
+const PHENOMENON_ICONS = [
+  [/tormenta/i, "⚡️"],
+  [/lluvia|precipitaci/i, "🌧️"],
+  [/temperatura|calor/i, "🌡️"],
+  [/costero|marítim/i, "🌊"],
+  [/viento|racha/i, "💨"],
+  [/nieve/i, "❄️"],
+  [/niebla/i, "🌫️"],
+];
+const ALERT_DESC_MAX = 140;
+
+function phenomenonShort(raw) {
+  // "Aviso de tormentas de nivel amarillo" -> "Tormentas" (el nivel ya lo dice el color)
+  const m = String(raw || "").match(/^aviso de (.+?) de nivel/i);
+  const name = (m ? m[1] : String(raw || "Aviso")).trim();
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function phenomenonIcon(raw) {
+  for (const [re, icon] of PHENOMENON_ICONS) if (re.test(String(raw || ""))) return icon;
+  return "⚠️";
+}
+
+function madridDateParts(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("es-ES", {
+    timeZone: "Europe/Madrid",
+    weekday: "long", day: "numeric", month: "long",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "";
+  return {
+    weekday: get("weekday"), day: get("day"), month: get("month"),
+    hour: Number(get("hour")), minute: Number(get("minute")),
+  };
+}
+
+// Día natural en Madrid (YYYY-MM-DD) — la clave con la que se agrupan los avisos
+function madridDayKey(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
+
+function alertDayHeading(iso, now = new Date()) {
+  const key = madridDayKey(iso);
+  const p = madridDateParts(iso);
+  if (!p) return "próximos avisos";
+  if (key === madridDayKey(now.toISOString())) return `hoy ${p.weekday} ${p.day}`;
+  if (key === madridDayKey(new Date(now.getTime() + 86400000).toISOString())) return `mañana ${p.weekday} ${p.day}`;
+  return `${p.weekday} ${p.day} de ${p.month}`;
+}
+
+function alertHourRange(from, to) {
+  const a = madridDateParts(from);
+  const b = madridDateParts(to);
+  if (!a || !b) return "";
+  // AEMET cierra las franjas en :59:59 => significa "hasta el final de esa hora"
+  const endHour = b.minute >= 59 ? b.hour + 1 : b.hour;
+  return `${String(a.hour).padStart(2, "0")}h → ${String(endHour).padStart(2, "0")}h`;
+}
+
+function truncateAlertDesc(s, n = ALERT_DESC_MAX) {
+  const t = String(s || "").trim();
+  return t.length <= n ? t : `${t.slice(0, n - 1).trimEnd()}…`;
+}
+
+function formatAlertGroupText(alerts) {
+  const sorted = [...alerts].sort(
+    (a, b) => alertRank(b.level) - alertRank(a.level) ||
+              new Date(a.validFrom).getTime() - new Date(b.validFrom).getTime()
+  );
+  const lines = [
+    `⚠️ *AVISOS AEMET — ${alertDayHeading(sorted[0]?.validFrom)}*`,
+    `📍 ${String(sorted[0]?.area || "Litoral sur de Castellón")}`,
+    "",
+  ];
+  for (const a of sorted) {
+    const range = alertHourRange(a.validFrom, a.validTo);
+    lines.push(
+      `${levelEmoji(a.level)} ${phenomenonIcon(a.phenomenon)} *${phenomenonShort(a.phenomenon)}*${range ? ` · ${range}` : ""}`
+    );
+    const desc = truncateAlertDesc(a.description);
+    if (desc) lines.push(desc);
+    lines.push("");
+  }
+  lines.push("🔗 meteo.cvbenicasim.com");
+  return lines.join("\n");
+}
+
+// Un array por día natural (Madrid), ordenados de más próximo a más lejano
+function groupAlertsByDay(alerts) {
+  const byDay = new Map();
+  for (const a of alerts) {
+    const key = madridDayKey(a.validFrom);
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(a);
+  }
+  return [...byDay.entries()]
+    .sort(([x], [y]) => String(x).localeCompare(String(y)))
+    .map(([, group]) => group);
+}
+
 function splitGroupIds(raw = WA_GROUP_IDS) {
   return String(raw)
     .split(",")
@@ -1112,28 +1223,30 @@ async function autoDispatchAemetAlertsToGroups() {
       return;
     }
 
-    for (const alert of alerts) {
-      // Never relay verde/unknown levels or already-expired avisos
-      if (alertRank(alert.level) < 2) continue;
-      const expiresTs = new Date(alert.validTo || 0).getTime();
-      if (expiresTs && expiresTs < Date.now()) continue;
-      const fp = alertFingerprint(alert);
-      const text = formatAlertWhatsappText(alert);
-      const seenSentGroups = [];
-      const seenExhaustedGroups = [];
-      for (const groupId of groupIds) {
-        const dispatchKey = targetDispatchKey(fp, groupId);
-        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) {
-          seenSentGroups.push(groupId);
-          continue;
-        }
-        // Cap duro por aviso y por grupo: un grupo que falla no fuerza reenvíos al otro.
-        if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) {
-          seenExhaustedGroups.push(groupId);
-          continue;
-        }
+    // Avisos relevantes: nada verde/desconocido, nada ya caducado
+    const eligible = alerts.filter((a) => {
+      if (alertRank(a.level) < 2) return false;
+      const expiresTs = new Date(a.validTo || 0).getTime();
+      return !(expiresTs && expiresTs < Date.now());
+    });
+
+    // Un mensaje por (grupo, día natural). El dedup sigue siendo POR AVISO, así
+    // que un aviso ya enviado nunca entra en un lote nuevo aunque se reagrupe.
+    for (const groupId of groupIds) {
+      const pending = eligible.filter((a) => {
+        const dispatchKey = targetDispatchKey(alertFingerprint(a), groupId);
+        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(alertFingerprint(a))) return false;
+        // Cap duro por aviso y por grupo, intacto respecto al envío individual
+        return (SEND_ATTEMPTS.get(dispatchKey) || 0) < MAX_SEND_ATTEMPTS;
+      });
+
+      for (const dayBatch of groupAlertsByDay(pending)) {
+        const text = formatAlertGroupText(dayBatch);
+        const keys = dayBatch.map((a) => ({ alert: a, fp: alertFingerprint(a), dispatchKey: targetDispatchKey(alertFingerprint(a), groupId) }));
         try {
-          await bumpSendAttempt(dispatchKey);
+          // El intento se apunta ANTES de enviar: si el proceso muere a medias,
+          // el hueco ya está reservado y el tope de 3 sigue siendo infranqueable.
+          for (const k of keys) await bumpSendAttempt(k.dispatchKey);
           const sendResult = await sendAlertToGroups(groupId, text);
           const groupResult = Array.isArray(sendResult?.results)
             ? sendResult.results.find((r) => String(r.groupId || "") === groupId)
@@ -1142,55 +1255,54 @@ async function autoDispatchAemetAlertsToGroups() {
           if (status === "failed") {
             throw new Error(groupResult?.error || `envío fallido a ${groupId}`);
           }
-          SENT_ALERT_KEYS.add(dispatchKey);
-          seenSentGroups.push(groupId);
           LAST_AUTO_DISPATCH.sent += 1;
+          for (const k of keys) {
+            SENT_ALERT_KEYS.add(k.dispatchKey);
+            if (db) {
+              await db.execute({
+                sql: `INSERT OR REPLACE INTO alert_dispatch_targets (dispatch_key, alert_key, group_id, status, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                args: [
+                  k.dispatchKey, k.fp, groupId, status, Date.now(),
+                  String(k.alert.area || ""), String(k.alert.level || ""),
+                  String(k.alert.phenomenon || ""),
+                  String(k.alert.validFrom || ""), String(k.alert.validTo || ""),
+                ],
+              });
+              await db.execute({
+                sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                args: [
+                  k.fp, Date.now(),
+                  String(k.alert.area || ""), String(k.alert.level || ""),
+                  String(k.alert.phenomenon || ""),
+                  String(k.alert.validFrom || ""), String(k.alert.validTo || ""),
+                ],
+              });
+            }
+          }
           if (db) {
-            await db.execute({
-              sql: `INSERT OR REPLACE INTO alert_dispatch_targets (dispatch_key, alert_key, group_id, status, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              args: [
-                dispatchKey,
-                fp,
-                groupId,
-                status,
-                Date.now(),
-                String(alert.area || ""),
-                String(alert.level || ""),
-                String(alert.phenomenon || ""),
-                String(alert.validFrom || ""),
-                String(alert.validTo || ""),
-              ],
-            });
-            await db.execute({
-              sql: `INSERT OR REPLACE INTO alert_dispatches (alert_key, sent_at, area, level, phenomenon, valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              args: [
-                fp,
-                Date.now(),
-                String(alert.area || ""),
-                String(alert.level || ""),
-                String(alert.phenomenon || ""),
-                String(alert.validFrom || ""),
-                String(alert.validTo || ""),
-              ],
-            });
-            await db.execute({
-              sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`,
-              args: [Date.now() - SAMPLE_RETENTION_MS],
-            });
-            await db.execute({
-              sql: `DELETE FROM alert_dispatch_targets WHERE sent_at < ?`,
-              args: [Date.now() - SAMPLE_RETENTION_MS],
-            });
+            await db.execute({ sql: `DELETE FROM alert_dispatches WHERE sent_at < ?`, args: [Date.now() - SAMPLE_RETENTION_MS] });
+            await db.execute({ sql: `DELETE FROM alert_dispatch_targets WHERE sent_at < ?`, args: [Date.now() - SAMPLE_RETENTION_MS] });
           }
           await saveSentAlertKeys();
-        } catch (alertErr) {
-          console.error(`fallo despachando aviso ${fp} al grupo ${groupId}:`, alertErr?.message || alertErr);
-          LAST_AUTO_DISPATCH.error = `aviso ${fp.slice(0, 40)} grupo ${groupId.slice(0, 24)}: ${String(alertErr?.message || alertErr).slice(0, 160)}`;
-          // This failed attempt may have been the 3rd and last one for this group
-          if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) seenExhaustedGroups.push(groupId);
+        } catch (batchErr) {
+          const fps = keys.map((k) => k.fp.slice(0, 32)).join(", ");
+          console.error(`fallo despachando lote [${fps}] al grupo ${groupId}:`, batchErr?.message || batchErr);
+          LAST_AUTO_DISPATCH.error = `lote ${keys.length} aviso(s) grupo ${groupId.slice(0, 24)}: ${String(batchErr?.message || batchErr).slice(0, 160)}`;
         }
       }
-      await recordAlertActivity(fp, alert, seenSentGroups, seenExhaustedGroups, groupIds.length);
+    }
+
+    // Histórico: un registro por aviso, con el desenlace en todos los grupos
+    for (const alert of eligible) {
+      const fp = alertFingerprint(alert);
+      const sentGroups = [];
+      const exhaustedGroups = [];
+      for (const groupId of groupIds) {
+        const dispatchKey = targetDispatchKey(fp, groupId);
+        if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) sentGroups.push(groupId);
+        else if ((SEND_ATTEMPTS.get(dispatchKey) || 0) >= MAX_SEND_ATTEMPTS) exhaustedGroups.push(groupId);
+      }
+      await recordAlertActivity(fp, alert, sentGroups, exhaustedGroups, groupIds.length);
     }
   } catch (err) {
     console.error("autoDispatchAemetAlertsToGroups error:", err?.message || err);
@@ -1579,6 +1691,27 @@ ${qrString
           });
         }
       }
+      // Mensajes reales que saldrían: uno por (grupo, día natural)
+      const outgoingMessages = [];
+      for (const groupId of groupIds) {
+        const pendingForGroup = [...byFp.values()].filter((a) => {
+          if (alertRank(a.level) < 2) return false;
+          const expiresTs = new Date(a.validTo || 0).getTime();
+          if (expiresTs && expiresTs < Date.now()) return false;
+          const fp = alertFingerprint(a);
+          const dispatchKey = targetDispatchKey(fp, groupId);
+          if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) return false;
+          return (SEND_ATTEMPTS.get(dispatchKey) || 0) < MAX_SEND_ATTEMPTS;
+        });
+        for (const dayBatch of groupAlertsByDay(pendingForGroup)) {
+          outgoingMessages.push({
+            group_id: groupId,
+            alerts: dayBatch.length,
+            fingerprints: dayBatch.map((a) => alertFingerprint(a)),
+            message: formatAlertGroupText(dayBatch),
+          });
+        }
+      }
       return json(res, 200, {
         ok: true,
         auto_send_enabled: WA_AUTO_SEND_ENABLED,
@@ -1587,6 +1720,7 @@ ${qrString
         api_alerts: apiAlerts.length,
         rss_alerts: rssAlerts.length,
         unique_after_dedup: byFp.size,
+        outgoing_messages: outgoingMessages,
         would_send: wouldSend,
         skipped,
         last_dispatch: LAST_AUTO_DISPATCH,
@@ -1713,5 +1847,10 @@ export {
   alertFingerprint,
   alertRank,
   formatAlertWhatsappText,
+  formatAlertGroupText,
+  groupAlertsByDay,
+  phenomenonShort,
+  phenomenonIcon,
+  alertHourRange,
   formatMadridDateTime,
 };
