@@ -267,6 +267,13 @@ function parseCapXmlToAlerts(xml) {
     const certainty = getTag(block, "certainty");
     if (!event && !description) continue;
 
+    // Parámetro Meteoalerta: "P1;Precipitación acumulada en una hora;60 mm".
+    // AEMET emite avisos SEPARADOS por parámetro, así que el mismo fenómeno y
+    // franja puede llevar dos avisos distintos (lluvia en 1 h y en 12 h) con
+    // niveles diferentes. Sin este código no se pueden distinguir.
+    const paramRaw = (block.match(/AEMET-Meteoalerta parametro<\/valueName>\s*<value>([^<]*)<\/value>/i) || [])[1] || "";
+    const paramCode = paramRaw.split(";")[0].trim();
+
     // One alert per <area>: multi-zone bulletins carry several areas per <info>
     const areaBlocks = [...block.matchAll(/<area>[\s\S]*?<\/area>/gi)].map((m) => m[0]);
     for (const ab of areaBlocks.length ? areaBlocks : [block]) {
@@ -276,6 +283,7 @@ function parseCapXmlToAlerts(xml) {
         id: `${identifier || "cap"}-${areaCode || Math.random().toString(36).slice(2, 8)}`,
         level,
         levelLabel: `Aviso ${level}`,
+        paramCode,
         phenomenon: event || "Aviso meteorológico",
         area: areaDesc || "Castellón",
         areaCode,
@@ -921,11 +929,18 @@ const PHENOMENON_ICONS = [
 ];
 const ALERT_DESC_MAX = 140;
 
-function phenomenonShort(raw) {
+// Etiqueta corta del parámetro. Solo la lluvia tiene dos parámetros distintos
+// (P1 = 1 hora, P2 = 12 horas) que AEMET avisa por separado y que pueden llevar
+// niveles distintos; el resto de fenómenos tienen uno solo y no necesitan nota.
+const PARAM_LABELS = { P1: "1 h", P2: "12 h" };
+
+function phenomenonShort(raw, paramCode = "") {
   // "Aviso de tormentas de nivel amarillo" -> "Tormentas" (el nivel ya lo dice el color)
   const m = String(raw || "").match(/^aviso de (.+?) de nivel/i);
   const name = (m ? m[1] : String(raw || "Aviso")).trim();
-  return name.charAt(0).toUpperCase() + name.slice(1);
+  const titled = name.charAt(0).toUpperCase() + name.slice(1);
+  const label = PARAM_LABELS[String(paramCode || "").toUpperCase()];
+  return label ? `${titled} (${label})` : titled;
 }
 
 function phenomenonIcon(raw) {
@@ -957,6 +972,13 @@ function madridDayKey(iso) {
   }).format(d);
 }
 
+function madridWeekdayShort(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("es-ES", { timeZone: "Europe/Madrid", weekday: "short" })
+    .format(d).replace(".", "");
+}
+
 function alertDayHeading(iso, now = new Date()) {
   const key = madridDayKey(iso);
   const p = madridDateParts(iso);
@@ -966,13 +988,64 @@ function alertDayHeading(iso, now = new Date()) {
   return `${p.weekday} ${p.day} de ${p.month}`;
 }
 
+// Cabecera del mensaje: un día suelto, o el rango si algún aviso cruza la medianoche
+function alertSpanHeading(alerts, now = new Date()) {
+  const froms = alerts.map((a) => new Date(a.validFrom).getTime()).filter((n) => !Number.isNaN(n));
+  const tos = alerts.map((a) => new Date(a.validTo).getTime()).filter((n) => !Number.isNaN(n));
+  if (!froms.length) return "próximos avisos";
+  const minFrom = new Date(Math.min(...froms)).toISOString();
+  const maxTo = new Date(Math.max(...tos.length ? tos : froms)).toISOString();
+  if (madridDayKey(minFrom) === madridDayKey(maxTo)) return alertDayHeading(minFrom, now);
+  const a = madridDateParts(minFrom);
+  const b = madridDateParts(maxTo);
+  return `${a.weekday} ${a.day} → ${b.weekday} ${b.day} de ${b.month}`;
+}
+
 function alertHourRange(from, to) {
   const a = madridDateParts(from);
   const b = madridDateParts(to);
   if (!a || !b) return "";
   // AEMET cierra las franjas en :59:59 => significa "hasta el final de esa hora"
   const endHour = b.minute >= 59 ? b.hour + 1 : b.hour;
-  return `${String(a.hour).padStart(2, "0")}h → ${String(endHour).padStart(2, "0")}h`;
+  const start = `${String(a.hour).padStart(2, "0")}h`;
+  const end = `${String(endHour).padStart(2, "0")}h`;
+  // Si cruza la medianoche hay que decir de qué día es cada extremo
+  if (madridDayKey(from) !== madridDayKey(to)) {
+    return `${madridWeekdayShort(from)} ${start} → ${madridWeekdayShort(to)} ${end}`;
+  }
+  return `${start} → ${end}`;
+}
+
+// AEMET parte un episodio continuo en tramos por día (jue 14h-24h + vie 00h-12h).
+// Los volvemos a unir cuando son el mismo fenómeno, parámetro y nivel, y el final
+// de uno enlaza con el principio del siguiente. Es solo presentación: cada aviso
+// original queda en `sources` para marcarlo como enviado por separado.
+const CONTIGUOUS_GAP_MS = 2 * 60 * 1000;
+
+function mergeContiguousAlerts(alerts) {
+  const byKey = new Map();
+  for (const a of alerts) {
+    const key = `${a.phenomenon}|${a.paramCode || ""}|${a.level}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(a);
+  }
+  const merged = [];
+  for (const group of byKey.values()) {
+    group.sort((x, y) => new Date(x.validFrom).getTime() - new Date(y.validFrom).getTime());
+    let current = null;
+    for (const a of group) {
+      const gap = current ? new Date(a.validFrom).getTime() - new Date(current.validTo).getTime() : Infinity;
+      if (current && gap >= 0 && gap <= CONTIGUOUS_GAP_MS) {
+        current.validTo = a.validTo;
+        current.sources.push(a);
+      } else {
+        if (current) merged.push(current);
+        current = { ...a, sources: [a] };
+      }
+    }
+    if (current) merged.push(current);
+  }
+  return merged;
 }
 
 function truncateAlertDesc(s, n = ALERT_DESC_MAX) {
@@ -986,14 +1059,14 @@ function formatAlertGroupText(alerts) {
               new Date(a.validFrom).getTime() - new Date(b.validFrom).getTime()
   );
   const lines = [
-    `⚠️ *AVISOS AEMET — ${alertDayHeading(sorted[0]?.validFrom)}*`,
+    `⚠️ *AVISOS AEMET — ${alertSpanHeading(sorted)}*`,
     `📍 ${String(sorted[0]?.area || "Litoral sur de Castellón")}`,
     "",
   ];
   for (const a of sorted) {
     const range = alertHourRange(a.validFrom, a.validTo);
     lines.push(
-      `${levelEmoji(a.level)} ${phenomenonIcon(a.phenomenon)} *${phenomenonShort(a.phenomenon)}*${range ? ` · ${range}` : ""}`
+      `${levelEmoji(a.level)} ${phenomenonIcon(a.phenomenon)} *${phenomenonShort(a.phenomenon, a.paramCode)}*${range ? ` · ${range}` : ""}`
     );
     const desc = truncateAlertDesc(a.description);
     if (desc) lines.push(desc);
@@ -1240,9 +1313,14 @@ async function autoDispatchAemetAlertsToGroups() {
         return (SEND_ATTEMPTS.get(dispatchKey) || 0) < MAX_SEND_ATTEMPTS;
       });
 
-      for (const dayBatch of groupAlertsByDay(pending)) {
+      // Fusionar ANTES de agrupar por día: si no, el tramo del jueves y el del
+      // viernes caerían en grupos distintos y nunca se podrían unir.
+      for (const dayBatch of groupAlertsByDay(mergeContiguousAlerts(pending))) {
         const text = formatAlertGroupText(dayBatch);
-        const keys = dayBatch.map((a) => ({ alert: a, fp: alertFingerprint(a), dispatchKey: targetDispatchKey(alertFingerprint(a), groupId) }));
+        // Cada línea fusionada puede venir de varios avisos originales: todos
+        // ellos hay que marcarlos como enviados, cada uno con su propia huella.
+        const originals = dayBatch.flatMap((a) => a.sources || [a]);
+        const keys = originals.map((a) => ({ alert: a, fp: alertFingerprint(a), dispatchKey: targetDispatchKey(alertFingerprint(a), groupId) }));
         try {
           // El intento se apunta ANTES de enviar: si el proceso muere a medias,
           // el hueco ya está reservado y el tope de 3 sigue siendo infranqueable.
@@ -1703,11 +1781,12 @@ ${qrString
           if (SENT_ALERT_KEYS.has(dispatchKey) || SENT_ALERT_KEYS.has(fp)) return false;
           return (SEND_ATTEMPTS.get(dispatchKey) || 0) < MAX_SEND_ATTEMPTS;
         });
-        for (const dayBatch of groupAlertsByDay(pendingForGroup)) {
+        for (const dayBatch of groupAlertsByDay(mergeContiguousAlerts(pendingForGroup))) {
+          const originals = dayBatch.flatMap((a) => a.sources || [a]);
           outgoingMessages.push({
             group_id: groupId,
-            alerts: dayBatch.length,
-            fingerprints: dayBatch.map((a) => alertFingerprint(a)),
+            alerts: originals.length,
+            fingerprints: originals.map((a) => alertFingerprint(a)),
             message: formatAlertGroupText(dayBatch),
           });
         }
@@ -1849,6 +1928,7 @@ export {
   formatAlertWhatsappText,
   formatAlertGroupText,
   groupAlertsByDay,
+  mergeContiguousAlerts,
   phenomenonShort,
   phenomenonIcon,
   alertHourRange,

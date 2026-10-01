@@ -9,10 +9,12 @@ process.env.RUNTIME_TEST_MODE = "1";
 const {
   formatAlertGroupText,
   groupAlertsByDay,
+  mergeContiguousAlerts,
   alertFingerprint,
   phenomenonShort,
   phenomenonIcon,
   alertHourRange,
+  parseCapXmlToAlerts,
 } = await import("../server/runtime.mjs");
 
 // Los dos avisos reales del 2026-10-01 (mismos datos que devolvió AEMET)
@@ -64,7 +66,8 @@ test("agrupa por día natural: mismo día juntos, días distintos separados", ()
 
 test("mensaje del 1 de octubre: un solo mensaje con ambos avisos", () => {
   const msg = formatAlertGroupText([lluvias, tormentas]);
-  assert.match(msg, /AVISOS AEMET — jueves 1 de octubre/);
+  // "hoy jueves 1" o "jueves 1 de octubre" según cuándo se ejecute el test
+  assert.match(msg, /AVISOS AEMET — .*jueves 1/);
   assert.match(msg, /Litoral sur de Castellón/);
   assert.match(msg, /🟡 🌧️ \*Lluvias\* · 14h → 24h/);
   assert.match(msg, /🟡 ⚡️ \*Tormentas\* · 14h → 24h/);
@@ -115,4 +118,105 @@ test("descripción larga se recorta a 140 caracteres", () => {
 test("aviso sin descripción no deja una línea vacía suelta", () => {
   const msg = formatAlertGroupText([{ ...lluvias, description: "" }]);
   assert.doesNotMatch(msg, /\n\n\n/);
+});
+
+// ── Parámetro P1 (1 h) vs P2 (12 h) ────────────────────────────────────────
+// Caso real del 29 sept: AEMET avisó naranja por intensidad en 1 h Y amarillo
+// por acumulado en 12 h, misma franja. Son dos avisos legítimos, no un error.
+
+const lluvia1h = {
+  level: "naranja", phenomenon: "Aviso de lluvias de nivel naranja", paramCode: "P1",
+  area: "Litoral sur de Castellón", areaCode: "771204",
+  description: "Precipitación acumulada en una hora: 40 mm.",
+  validFrom: "2026-09-29T04:00:00+02:00", validTo: "2026-09-29T09:59:59+02:00",
+};
+const lluvia12h = {
+  level: "amarillo", phenomenon: "Aviso de lluvias de nivel amarillo", paramCode: "P2",
+  area: "Litoral sur de Castellón", areaCode: "771204",
+  description: "Precipitación acumulada en 12 horas: 60 mm.",
+  validFrom: "2026-09-29T04:00:00+02:00", validTo: "2026-09-29T09:59:59+02:00",
+};
+
+test("P1 y P2 de la misma franja: un mensaje, dos líneas distinguibles", () => {
+  const msg = formatAlertGroupText([lluvia1h, lluvia12h]);
+  assert.match(msg, /🟠 🌧️ \*Lluvias \(1 h\)\* · 04h → 10h/);
+  assert.match(msg, /🟡 🌧️ \*Lluvias \(12 h\)\* · 04h → 10h/);
+  // El naranja primero, que es el que manda de un vistazo
+  assert.ok(msg.indexOf("(1 h)") < msg.indexOf("(12 h)"));
+});
+
+test("fenómenos de un solo parámetro no llevan etiqueta", () => {
+  assert.equal(phenomenonShort("Aviso de tormentas de nivel amarillo", "TO"), "Tormentas");
+  assert.equal(phenomenonShort("Aviso de temperaturas máximas de nivel naranja", "TA"), "Temperaturas máximas");
+});
+
+test("P1 y P2 NO se fusionan aunque compartan franja (son avisos distintos)", () => {
+  const merged = mergeContiguousAlerts([lluvia1h, lluvia12h]);
+  assert.equal(merged.length, 2);
+});
+
+// ── Fusión de franjas contiguas que cruzan la medianoche ───────────────────
+
+const jueTarde = {
+  level: "naranja", phenomenon: "Aviso de lluvias de nivel naranja", paramCode: "P1",
+  area: "Litoral sur de Castellón",
+  description: "Precipitación acumulada en una hora: 50 mm.",
+  validFrom: "2026-10-01T14:00:00+02:00", validTo: "2026-10-01T23:59:59+02:00",
+};
+const vieManana = {
+  level: "naranja", phenomenon: "Aviso de lluvias de nivel naranja", paramCode: "P1",
+  area: "Litoral sur de Castellón",
+  description: "Precipitación acumulada en una hora: 50 mm.",
+  validFrom: "2026-10-02T00:00:00+02:00", validTo: "2026-10-02T11:59:59+02:00",
+};
+
+test("episodio que cruza medianoche: se une en una sola entrada", () => {
+  const merged = mergeContiguousAlerts([jueTarde, vieManana]);
+  assert.equal(merged.length, 1, "los dos tramos son un solo episodio");
+  assert.equal(merged[0].sources.length, 2, "conserva los dos avisos originales");
+  assert.equal(merged[0].validFrom, jueTarde.validFrom);
+  assert.equal(merged[0].validTo, vieManana.validTo);
+});
+
+test("episodio que cruza medianoche: un único mensaje con rango de días", () => {
+  const grupos = groupAlertsByDay(mergeContiguousAlerts([jueTarde, vieManana]));
+  assert.equal(grupos.length, 1, "un solo mensaje, no uno por día");
+  const msg = formatAlertGroupText(grupos[0]);
+  assert.match(msg, /jueves 1 → viernes 2 de octubre/);
+  assert.match(msg, /jue 14h → vie 12h/);
+});
+
+test("franjas separadas por horas NO se fusionan", () => {
+  const manana = { ...jueTarde, validFrom: "2026-10-01T00:00:00+02:00", validTo: "2026-10-01T09:59:59+02:00" };
+  const tarde = { ...jueTarde, validFrom: "2026-10-01T14:00:00+02:00", validTo: "2026-10-01T23:59:59+02:00" };
+  assert.equal(mergeContiguousAlerts([manana, tarde]).length, 2);
+});
+
+test("niveles distintos NO se fusionan aunque las franjas enlacen", () => {
+  const vieAmarillo = { ...vieManana, level: "amarillo", phenomenon: "Aviso de lluvias de nivel amarillo" };
+  assert.equal(mergeContiguousAlerts([jueTarde, vieAmarillo]).length, 2);
+});
+
+test("CRÍTICO: fusionar no altera la huella de los avisos originales", () => {
+  const antes = [jueTarde, vieManana].map(alertFingerprint);
+  const merged = mergeContiguousAlerts([jueTarde, vieManana]);
+  const desdeSources = merged[0].sources.map(alertFingerprint);
+  assert.deepEqual(desdeSources, antes, "las huellas de origen se conservan intactas");
+});
+
+test("el parser extrae el código de parámetro del CAP", () => {
+  const xml = `<alert><status>Actual</status><msgType>Alert</msgType>
+    <identifier>TEST.1</identifier>
+    <info><language>es-ES</language><severity>Severe</severity>
+      <event>Aviso de lluvias de nivel naranja</event>
+      <description>Precipitación acumulada en una hora: 40 mm.</description>
+      <onset>2099-10-01T14:00:00+02:00</onset><expires>2099-10-01T23:59:59+02:00</expires>
+      <parameter><valueName>AEMET-Meteoalerta parametro</valueName><value>P1;Precipitación acumulada en una hora;40 mm</value></parameter>
+      <area><areaDesc>Litoral sur de Castellón</areaDesc>
+        <geocode><valueName>AEMET-Meteoalerta zona</valueName><value>771204</value></geocode>
+      </area>
+    </info></alert>`;
+  const [a] = parseCapXmlToAlerts(xml);
+  assert.equal(a.paramCode, "P1");
+  assert.match(formatAlertGroupText([a]), /\*Lluvias \(1 h\)\*/);
 });
