@@ -23,6 +23,7 @@ const lluvias = {
   phenomenon: "Aviso de lluvias de nivel amarillo",
   area: "Litoral sur de Castellón",
   areaCode: "771204",
+  paramCode: "P1",
   description: "Precipitación acumulada en una hora: 30 mm.",
   validFrom: "2026-10-01T14:00:00+02:00",
   validTo: "2026-10-01T23:59:59+02:00",
@@ -32,6 +33,7 @@ const tormentas = {
   phenomenon: "Aviso de tormentas de nivel amarillo",
   area: "Litoral sur de Castellón",
   areaCode: "771204",
+  paramCode: "TO",
   description: "Posible granizo y rachas muy fuertes de viento.",
   validFrom: "2026-10-01T14:00:00+02:00",
   validTo: "2026-10-01T23:59:59+02:00",
@@ -46,15 +48,29 @@ const naranjaOtroDia = {
   validTo: "2026-10-03T20:59:59+02:00",
 };
 
-test("CRÍTICO: agrupar no cambia el fingerprint de ningún aviso", () => {
+test("CRÍTICO: agrupar/formatear no cambia el fingerprint de ningún aviso", () => {
   // Si esto falla, los avisos ya enviados se reenviarían al reagruparse.
   const before = [lluvias, tormentas, naranjaOtroDia].map(alertFingerprint);
   groupAlertsByDay([lluvias, tormentas, naranjaOtroDia]).forEach((batch) => formatAlertGroupText(batch));
   const after = [lluvias, tormentas, naranjaOtroDia].map(alertFingerprint);
   assert.deepEqual(after, before);
-  // Y coinciden exactamente con las huellas que ya están marcadas como enviadas
-  assert.equal(before[0], "771204__aviso de lluvias de nivel amarillo__amarillo__1790856000000");
-  assert.equal(before[1], "771204__aviso de tormentas de nivel amarillo__amarillo__1790856000000");
+});
+
+test("CRÍTICO: formato exacto de la huella (cambiarlo exige migración)", () => {
+  // Estas cadenas son las claves con las que se guarda "ya enviado" en BD.
+  // Si cambian sin migrar las filas existentes, TODO lo ya enviado vuelve a
+  // parecer nuevo y se reenvía al grupo. Ver migración del 2026-10-01 al
+  // añadir el parámetro (P1/P2/TO) a la huella.
+  assert.equal(
+    alertFingerprint(lluvias),
+    "771204__aviso de lluvias de nivel amarillo__amarillo__1790856000000__p1"
+  );
+  assert.equal(
+    alertFingerprint(tormentas),
+    "771204__aviso de tormentas de nivel amarillo__amarillo__1790856000000__to"
+  );
+  // Sin parámetro conocido se usa "-" para que el formato sea siempre el mismo
+  assert.match(alertFingerprint({ ...lluvias, paramCode: "" }), /__-$/);
 });
 
 test("agrupa por día natural: mismo día juntos, días distintos separados", () => {
@@ -69,7 +85,7 @@ test("mensaje del 1 de octubre: un solo mensaje con ambos avisos", () => {
   // "hoy jueves 1" o "jueves 1 de octubre" según cuándo se ejecute el test
   assert.match(msg, /AVISOS AEMET — .*jueves 1/);
   assert.match(msg, /Litoral sur de Castellón/);
-  assert.match(msg, /🟡 🌧️ \*Lluvias\* · 14h → 24h/);
+  assert.match(msg, /🟡 🌧️ \*Lluvias \(1 h\)\* · 14h → 24h/);
   assert.match(msg, /🟡 ⚡️ \*Tormentas\* · 14h → 24h/);
   assert.match(msg, /Precipitación acumulada en una hora: 30 mm\./);
   assert.match(msg, /Posible granizo y rachas muy fuertes de viento\./);
@@ -153,6 +169,31 @@ test("fenómenos de un solo parámetro no llevan etiqueta", () => {
 test("P1 y P2 NO se fusionan aunque compartan franja (son avisos distintos)", () => {
   const merged = mergeContiguousAlerts([lluvia1h, lluvia12h]);
   assert.equal(merged.length, 2);
+});
+
+test("CRÍTICO: P1 y P2 del MISMO nivel tienen huellas distintas", () => {
+  // El test de arriba usa naranja+amarillo, así que el nivel ya los separaba y
+  // no probaba nada. Si AEMET publica los dos parámetros con el mismo nivel y
+  // la misma franja, sin el parámetro en la huella uno se descarta en silencio.
+  const base = {
+    area: "Litoral sur de Castellón", areaCode: "771204", level: "amarillo",
+    phenomenon: "Aviso de lluvias de nivel amarillo",
+    validFrom: "2026-10-05T14:00:00+02:00", validTo: "2026-10-05T23:59:59+02:00",
+  };
+  const p1 = { ...base, paramCode: "P1", description: "Precipitación acumulada en una hora: 20 mm." };
+  const p2 = { ...base, paramCode: "P2", description: "Precipitación acumulada en 12 horas: 60 mm." };
+  assert.notEqual(alertFingerprint(p1), alertFingerprint(p2));
+
+  // Y que sobrevivan los dos al dedup por huella que hace el dispatcher
+  const byFp = new Map();
+  for (const a of [p1, p2]) {
+    const fp = alertFingerprint(a);
+    if (!byFp.has(fp)) byFp.set(fp, a);
+  }
+  assert.equal(byFp.size, 2, "los dos avisos deben sobrevivir al dedup");
+  const msg = formatAlertGroupText([...byFp.values()]);
+  assert.match(msg, /\(1 h\)/);
+  assert.match(msg, /\(12 h\)/);
 });
 
 // ── Fusión de franjas contiguas que cruzan la medianoche ───────────────────

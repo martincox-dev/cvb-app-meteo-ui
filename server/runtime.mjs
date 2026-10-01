@@ -876,7 +876,12 @@ function alertFingerprint(alert) {
   const level = norm(alert?.level);
   const fromTs = new Date(alert?.validFrom || "").getTime();
   const from = Number.isNaN(fromTs) ? norm(alert?.validFrom) : String(fromTs);
-  return `${zone}__${phenomenon}__${level}__${from}`;
+  // El parámetro forma parte de la identidad: AEMET emite avisos SEPARADOS por
+  // parámetro y pueden coincidir zona, fenómeno, nivel y franja (lluvia en 1 h
+  // y en 12 h, ambos amarillos). Sin esto los dos comparten huella y el dedup
+  // descarta uno en silencio — no llega al grupo ni queda en el histórico.
+  const param = norm(alert?.paramCode) || "-";
+  return `${zone}__${phenomenon}__${level}__${from}__${param}`;
 }
 
 function formatMadridDateTime(iso) {
