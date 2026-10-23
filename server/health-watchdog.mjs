@@ -98,13 +98,18 @@ export function buildDigest(items) {
   }
 
   const onlyReminders = problems.every((i) => i.action === "reminder");
-  const parts = problems.map((i) => `${i.check.label}: ${i.result.detail}`);
+  // "aviso" = algo que se acerca (p.ej. el plazo de la clave), no un fallo ya presente
+  const onlyHeadsUp = problems.every((i) => i.check.severity === "aviso");
+  // Con un solo problema el nombre ya va en el título: no se repite en el detalle
+  const parts = problems.length === 1
+    ? [problems[0].result.detail]
+    : problems.map((i) => `${i.check.label}: ${i.result.detail}`);
   if (recovered.length) parts.push(`(recuperado: ${labels(recovered)})`);
   const hint = problems.find((i) => i.check.hint)?.check.hint;
   if (hint) parts.push(hint);
 
   return {
-    nivel: onlyReminders ? "RECORDATORIO" : "FALLO",
+    nivel: onlyReminders ? "RECORDATORIO" : onlyHeadsUp ? "AVISO" : "FALLO",
     titulo: problems.length === 1 ? problems[0].check.label : `${problems.length} fallos del sistema`,
     detalle: parts.join(" | "),
     desde: madridTime(Math.min(...problems.map((i) => i.since))),
@@ -134,6 +139,7 @@ export function aemetDeadlineCheck({ deadline, now = () => Date.now(), warnDays 
   return {
     name: "aemet_key_deadline",
     label: "Plazo de la clave de AEMET",
+    severity: "aviso",
     hint: "La clave no cambia al renovarla: actualiza AEMET_KEY_DEADLINE con la nueva fecha.",
     opts: { failThreshold: 1, repeatEveryMs: 3 * DAY_MS },
     run: async () => {

@@ -119,6 +119,27 @@ test("digest con varios fallos: un solo resumen", () => {
   assert.match(d.detalle, /Token de Meta/);
 });
 
+test("un solo problema: el nombre va en el título y no se repite en el detalle", () => {
+  const d = buildDigest([{ action: "alert", since: T0, check: { label: "Clave de AEMET" }, result: { detail: "HTTP 401" } }]);
+  assert.equal(d.titulo, "Clave de AEMET");
+  assert.equal(d.detalle, "HTTP 401");
+});
+
+test("el plazo próximo de la clave se presenta como AVISO, no como FALLO", async () => {
+  const now = () => Date.parse("2026-10-23T08:00:00Z");
+  const check = aemetDeadlineCheck({ deadline: "2026-11-01", now });
+  const result = await check.run();
+  assert.equal(result.ok, false);
+  const d = buildDigest([{ action: "alert", since: T0, check, result }]);
+  assert.equal(d.nivel, "AVISO");
+  // pero si además falla algo real, manda el FALLO
+  const mixto = buildDigest([
+    { action: "alert", since: T0, check, result },
+    { action: "alert", since: T0, check: { label: "BD" }, result: { detail: "caída" } },
+  ]);
+  assert.equal(mixto.nivel, "FALLO");
+});
+
 test("digest de recuperación y de recordatorio", () => {
   const rec = buildDigest([{ action: "recovered", since: T0, check: { label: "Clave de AEMET" }, result: { detail: "OK" } }]);
   assert.equal(rec.nivel, "RECUPERADO");
