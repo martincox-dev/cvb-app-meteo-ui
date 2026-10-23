@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { spawn } from "node:child_process";
 import { createClient } from "@libsql/client";
+import { createWatchdog, aemetDeadlineCheck, digestToTemplateParams } from "./health-watchdog.mjs";
 
 const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
@@ -41,6 +42,15 @@ const AEMET_VIS_STATION_ID = "8500A"; // Castellón-Almassora
 const WA_AUTO_SEND_ENABLED = String(process.env.WA_AUTO_SEND_ENABLED || "true").toLowerCase() === "true";
 const WA_AUTO_SEND_INTERVAL_MS = Math.max(60000, Number(process.env.WA_AUTO_SEND_INTERVAL_MS || 180000));
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || "cvb-group-list-temp";
+// Vigilante de salud: avisa al dueño por la API oficial de WhatsApp (no usa
+// Chromium ni la sesión QR, así que no interfiere con el envío a grupos).
+const HEALTH_ALERTS_ENABLED = String(process.env.HEALTH_ALERTS_ENABLED || "true").toLowerCase() === "true";
+const HEALTH_ALERT_TO = String(process.env.HEALTH_ALERT_TO || process.env.WHATSAPP_TEST_TO || "").replace(/\s+/g, "");
+const HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+// La clave de AEMET NO cambia al renovarla, así que su plazo se configura a mano
+// (AEMET_KEY_DEADLINE=YYYY-MM-DD, la fecha que indique AEMET al renovar).
+const AEMET_KEY_DEADLINE = String(process.env.AEMET_KEY_DEADLINE || "").trim();
+const PROCESS_STARTED_AT = Date.now();
 const WA_GROUP_IDS = process.env.WA_GROUP_IDS || "";
 // Separate target for the manual /api/whatsapp/wa-test button, decoupled from
 // WA_GROUP_IDS (the real auto-dispatch list) so testing never touches the
@@ -196,6 +206,17 @@ async function initDb() {
       phenomenon TEXT,
       valid_from TEXT,
       valid_to TEXT
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS health_state (
+      check_name TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      fails INTEGER NOT NULL DEFAULT 0,
+      alerted_at INTEGER,
+      since INTEGER NOT NULL,
+      detail TEXT,
+      updated_at INTEGER NOT NULL
     )
   `);
   await db.execute("CREATE INDEX IF NOT EXISTS idx_wind_samples_ts ON wind_samples(ts)");
@@ -1849,12 +1870,29 @@ ${qrString
               .then((r) => ({ name: "bunny_storage", ok: r.ok || r.status === 404, detail: `HTTP ${r.status}` }))
               .catch((e) => ({ name: "bunny_storage", ok: false, detail: e?.message }))
           : Promise.resolve({ name: "bunny_storage", ok: false, detail: "BUNNY_STORAGE_ZONE/PASSWORD no configuradas" }),
-        // Sesión WA local
+        // Sesión WA local (en el volumen persistente si existe; antes miraba la
+        // ruta antigua y daba un falso FALLO permanente)
         Promise.resolve({
           name: "wa_session",
-          ok: existsSync(join(root, ".wwebjs_auth")),
-          detail: existsSync(join(root, ".wwebjs_auth")) ? "sesión local presente" : "sin sesión local (se restaura de Bunny Storage al enviar)",
+          ok: existsSync(join(WA_DATA_DIR, `session-${WA_CLIENT_ID}`)),
+          detail: existsSync(join(WA_DATA_DIR, `session-${WA_CLIENT_ID}`))
+            ? `sesión presente en ${WA_DATA_DIR}`
+            : `sin sesión en ${WA_DATA_DIR} (se restaura de Bunny Storage al enviar)`,
         }),
+        // Vigilante de salud (avisos al móvil del dueño)
+        Promise.resolve((() => {
+          if (!HEALTH_ALERTS_ENABLED) return { name: "health_watchdog", ok: true, detail: "desactivado (HEALTH_ALERTS_ENABLED=false)" };
+          if (!healthWatchdog) return { name: "health_watchdog", ok: false, detail: "no iniciado" };
+          const snap = healthWatchdog.getSnapshot();
+          if (!snap.lastRun) return { name: "health_watchdog", ok: true, detail: "esperando la primera pasada" };
+          const failing = Object.entries(snap.checks).filter(([, v]) => v.ok === false).map(([k, v]) => `${k}${v.alerted ? " (avisado)" : ""}`);
+          const dest = HEALTH_ALERT_TO ? `aviso a …${HEALTH_ALERT_TO.slice(-3)}` : "SIN DESTINO de aviso";
+          return {
+            name: "health_watchdog",
+            ok: failing.length === 0 && Boolean(HEALTH_ALERT_TO),
+            detail: `última pasada hace ${Math.round((Date.now() - snap.lastRun) / 60000)} min · ${dest} · ${failing.length ? `fallando: ${failing.join(", ")}` : "todo OK"}`,
+          };
+        })()),
         // Open-Meteo (sin auth)
         fetchOpenMeteo()
           .then((d) => ({ name: "open_meteo", ok: !!(d?.meteo?.current), detail: "OK" }))
@@ -1899,6 +1937,164 @@ ${qrString
   }
 });
 
+// ── Vigilante de salud ──────────────────────────────────────────────────────
+// Misma detección del volumen persistente que los scripts de WhatsApp.
+const WA_DATA_DIR = process.env.WA_DATA_DIR || (existsSync("/data/wa-session") ? "/data/wa-session" : join(root, ".wwebjs_auth"));
+
+const healthMemoryStore = new Map();
+const healthStore = {
+  async load(name) {
+    if (db) {
+      try {
+        const r = await db.execute({ sql: "SELECT status, fails, alerted_at, since FROM health_state WHERE check_name = ?", args: [name] });
+        const row = r.rows?.[0];
+        if (row) {
+          return {
+            status: String(row.status),
+            fails: Number(row.fails) || 0,
+            alertedAt: row.alerted_at == null ? null : Number(row.alerted_at),
+            since: Number(row.since),
+          };
+        }
+        return null;
+      } catch { /* cae a memoria */ }
+    }
+    return healthMemoryStore.get(name) ?? null;
+  },
+  async save(name, state, detail) {
+    healthMemoryStore.set(name, state);
+    if (!db) return;
+    try {
+      await db.execute({
+        sql: "INSERT OR REPLACE INTO health_state (check_name, status, fails, alerted_at, since, detail, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        args: [name, state.status, state.fails, state.alertedAt, state.since, String(detail || "").slice(0, 300), Date.now()],
+      });
+    } catch (e) {
+      console.error("health_state save error:", e?.message || e);
+    }
+  },
+};
+
+// ok:true = bien · ok:false = fallo · ok:null = no se puede juzgar (no cuenta)
+function buildHealthChecks() {
+  const checks = [];
+
+  checks.push({
+    name: "aemet_api",
+    label: "Clave de la API de AEMET",
+    hint: "Renuévala en AEMET OpenData; la clave no cambia al renovarla.",
+    run: async () => {
+      if (!AEMET_API_KEY) return { ok: false, detail: "AEMET_API_KEY no configurada" };
+      const r = await fetch("https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77", {
+        headers: { api_key: AEMET_API_KEY },
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => null);
+      if (!r) return { ok: null, detail: "sin respuesta (red o timeout)" };
+      if (r.status === 401 || r.status === 403) {
+        return { ok: false, detail: `AEMET rechaza la clave (HTTP ${r.status}): ha caducado o fue revocada` };
+      }
+      if (r.ok) return { ok: true, detail: "OK" };
+      // 429 / 5xx: el problema es de AEMET, no se puede juzgar la clave
+      return { ok: null, detail: `HTTP ${r.status}` };
+    },
+  });
+
+  checks.push({
+    name: "aemet_rss",
+    label: "Feed RSS de avisos de AEMET",
+    run: async () => {
+      try {
+        const xml = await fetchText(AEMET_RSS_FEEDS[0]);
+        return xml.includes("<rss") ? { ok: true, detail: "OK" } : { ok: false, detail: "respuesta sin formato RSS" };
+      } catch (e) {
+        return { ok: false, detail: String(e?.message || e).slice(0, 120) };
+      }
+    },
+  });
+
+  // Ojo: si este token falla, el propio aviso no puede enviarse (mismo canal).
+  // Sigue siendo visible en /api/status.
+  checks.push({
+    name: "meta_wa_token",
+    label: "Token de la API oficial de WhatsApp",
+    hint: "Genera un token permanente de usuario del sistema en Meta Business.",
+    run: async () => {
+      if (!WHATSAPP_API_TOKEN) return { ok: false, detail: "WHATSAPP_API_TOKEN no configurado" };
+      const t = encodeURIComponent(WHATSAPP_API_TOKEN);
+      const r = await fetch(`https://graph.facebook.com/debug_token?input_token=${t}&access_token=${t}`, {
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => null);
+      if (!r) return { ok: null, detail: "sin respuesta (red o timeout)" };
+      const d = await r.json().catch(() => ({}));
+      if (d?.error) return { ok: false, detail: String(d.error.message || "error de Meta").slice(0, 160) };
+      if (d?.data?.is_valid === false) return { ok: false, detail: "el token ya no es válido" };
+      return { ok: true, detail: "OK" };
+    },
+  });
+
+  if (db) {
+    checks.push({
+      name: "bunnydb",
+      label: "Base de datos (BunnyDB)",
+      run: async () => {
+        try {
+          await db.execute("SELECT 1");
+          return { ok: true, detail: "OK" };
+        } catch (e) {
+          return { ok: false, detail: String(e?.message || e).slice(0, 140) };
+        }
+      },
+    });
+  }
+
+  checks.push({
+    name: "dispatcher",
+    label: "Envío automático de avisos",
+    run: async () => {
+      if (!WA_AUTO_SEND_ENABLED) return { ok: true, detail: "desactivado por configuración" };
+      if (Date.now() - PROCESS_STARTED_AT < 10 * 60 * 1000) return { ok: null, detail: "arrancando" };
+      const last = LAST_AUTO_DISPATCH.at ? Date.parse(LAST_AUTO_DISPATCH.at) : 0;
+      const staleMs = Date.now() - last;
+      // Un envío largo puede retrasar el ciclo hasta ~11 min; margen holgado
+      if (staleMs > 3 * WA_AUTO_SEND_INTERVAL_MS + 10 * 60 * 1000) {
+        return { ok: false, detail: `sin ciclo del dispatcher desde hace ${Math.round(staleMs / 60000)} min` };
+      }
+      return { ok: true, detail: "OK" };
+    },
+  });
+
+  checks.push(aemetDeadlineCheck({ deadline: AEMET_KEY_DEADLINE }));
+  return checks;
+}
+
+async function notifyOwner(digest) {
+  if (!HEALTH_ALERT_TO || !WHATSAPP_API_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    throw new Error("sin destino o credenciales de la API oficial de WhatsApp");
+  }
+  const parameters = digestToTemplateParams(digest).map((text) => ({ type: "text", text }));
+  await sendWhatsAppTemplate({
+    to: HEALTH_ALERT_TO,
+    templateName: WHATSAPP_TEMPLATE_NAME,
+    langCode: WHATSAPP_TEMPLATE_LANG,
+    components: [{ type: "body", parameters }],
+  });
+}
+
+let healthWatchdog = null;
+function startHealthWatchdog() {
+  if (!HEALTH_ALERTS_ENABLED) {
+    console.log("Vigilante de salud desactivado (HEALTH_ALERTS_ENABLED=false)");
+    return;
+  }
+  healthWatchdog = createWatchdog({ checks: buildHealthChecks(), notify: notifyOwner, store: healthStore });
+  const tick = () => healthWatchdog.runOnce().catch((e) => console.error("health-watchdog error:", e?.message || e));
+  setTimeout(tick, 2 * 60 * 1000); // margen tras arrancar
+  setInterval(tick, HEALTH_CHECK_INTERVAL_MS);
+  console.log(
+    `Vigilante de salud activo (cada ${HEALTH_CHECK_INTERVAL_MS / 60000} min, aviso a ${HEALTH_ALERT_TO ? `…${HEALTH_ALERT_TO.slice(-3)}` : "SIN DESTINO CONFIGURADO"})`
+  );
+}
+
 // DB must be ready (tables created) before anything writes samples or reads dispatch keys
 async function startBackgroundLoops() {
   try {
@@ -1916,6 +2112,7 @@ async function startBackgroundLoops() {
   }
   autoDispatchAemetAlertsToGroups();
   setInterval(autoDispatchAemetAlertsToGroups, WA_AUTO_SEND_INTERVAL_MS);
+  startHealthWatchdog();
 }
 
 // RUNTIME_TEST_MODE=1 allows importing this module (npm test) without side effects
@@ -1938,4 +2135,5 @@ export {
   phenomenonIcon,
   alertHourRange,
   formatMadridDateTime,
+  buildHealthChecks,
 };

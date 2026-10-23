@@ -55,7 +55,10 @@ Consulta `.env.example` para la lista completa. Las mínimas para producción:
 | `BUNNY_STORAGE_ZONE` | Nombre de la zona (ej. `cvb-meteo-state`) |
 | `BUNNY_STORAGE_PASSWORD` | API key de la zona |
 | `BUNNY_WA_SESSION_OBJECT` | `state/wa-session.tgz` |
-| `AEMET_API_KEY` | Opcional — sin ella se usan los feeds RSS |
+| `AEMET_API_KEY` | Clave de AEMET OpenData. **Caduca** y hay que renovarla (la clave no cambia al renovar). Sin ella siguen funcionando los feeds RSS |
+| `AEMET_KEY_DEADLINE` | `YYYY-MM-DD`, la fecha límite que indique AEMET al renovar. Activa el aviso 14 días antes |
+| `HEALTH_ALERTS_ENABLED` | `true` (por defecto) para el vigilante de salud |
+| `HEALTH_ALERT_TO` | Número que recibe los avisos de fallo (por defecto `WHATSAPP_TEST_TO`) |
 | `LIBSQL_URL` + `LIBSQL_AUTH_TOKEN` | BunnyDB para histórico persistente |
 
 ---
@@ -113,9 +116,28 @@ fetchAemetAlerts()           →  API AEMET oficial (requiere AEMET_API_KEY)
 fetchAemetAlertsFromRssCap() →  Feeds RSS/CAP públicos (sin API key)
 ```
 
-Si hay `AEMET_API_KEY` usa la API; si no, cae back a RSS. En ambos casos filtra por zona (`AEMET_TARGET_ZONE_CODES`) y/o palabras clave (`AEMET_TARGET_KEYWORDS`).
+Las dos fuentes se **fusionan y deduplican** (no es una u otra): si la clave de AEMET falla, los avisos siguen llegando por RSS, solo se pierde la redundancia. Se filtra por zona (`AEMET_TARGET_ZONE_CODES`, por defecto `771204`).
 
-Para forzar un reenvío (p.ej. para pruebas): borrar `server/sent-alert-keys.json` y reiniciar el MC.
+Para reenviar algo hay que borrar sus filas en `alert_dispatch_targets` / `alert_send_attempts` (BunnyDB). **Antes de desplegar**, poner `WA_AUTO_SEND_ENABLED=false` y revisar `/api/aemet/dry-run`.
+
+---
+
+## Vigilante de salud
+
+`server/health-watchdog.mjs` comprueba cada 15 min los servicios críticos y avisa al móvil del dueño por la **API oficial de WhatsApp** (plantilla `cvb_alerta_meteo`; no usa Chromium ni la sesión QR):
+
+| Chequeo | Falla si… |
+|---|---|
+| `aemet_api` | AEMET devuelve 401/403 (clave caducada o revocada) |
+| `aemet_rss` | el feed RSS no responde o no es RSS |
+| `meta_wa_token` | el token de Meta es inválido (ese aviso no podría enviarse: visible solo en `/api/status`) |
+| `bunnydb` | la BD no responde |
+| `dispatcher` | el ciclo de envío lleva mucho sin ejecutarse |
+| `aemet_key_deadline` | faltan ≤14 días para `AEMET_KEY_DEADLINE` |
+
+Reglas anti-spam: avisa tras **2 pasadas seguidas** fallando, no repite el mismo fallo en menos de 24 h (3 días el plazo de la clave), manda **un solo mensaje por pasada** con todos los fallos, tope de 6 mensajes al día, y avisa también al recuperarse. Si el envío del aviso falla, no lo da por enviado y reintenta. El estado se guarda en la tabla `health_state`. Un 5xx/429/timeout de un tercero cuenta como "desconocido", no como fallo.
+
+Estado actual en `/api/status` → `health_watchdog`.
 
 ---
 
