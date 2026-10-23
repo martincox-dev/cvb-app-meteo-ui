@@ -131,6 +131,39 @@ export function digestToTemplateParams(digest) {
 }
 
 /**
+ * Juzga la clave de AEMET con varios intentos seguidos en vez de uno solo.
+ *
+ * Tras la caducidad del 2026-10-15 la API empezó a devolver 401 de forma
+ * INTERMITENTE con una clave válida (4 de 20 peticiones, 7 de 33 en otra
+ * muestra, en ráfagas): una clave de verdad caducada falla el 100 % de las
+ * veces, una intermitente solo a ratos. Con un solo intento, el vigilante
+ * habría mandado un FALLO y un RECUPERADO varias veces al día. Con 4 intentos
+ * y exigiendo que fallen todos, una tasa de fallo del 20 % da un falso
+ * positivo por pasada de 0,2^4 = 0,16 %, y de ~0,0003 % exigiendo dos pasadas.
+ *
+ * doRequest(): devuelve el código HTTP, o null si no hubo respuesta (red/timeout)
+ * Devuelve {ok: true|false|null, detail}; null = no se puede juzgar la clave.
+ */
+export async function probeAemetKey({ doRequest, attempts = 4, gapMs = 1500, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  let rejected = 0;
+  let other = null;
+  for (let i = 0; i < attempts; i++) {
+    const status = await doRequest();
+    if (status !== null && status >= 200 && status < 300) {
+      return { ok: true, detail: i === 0 ? "OK" : `OK (a la ${i + 1}ª petición; AEMET da 401 de forma intermitente)` };
+    }
+    if (status === 401 || status === 403) rejected += 1;
+    else if (status !== null) other = status; // 429 / 5xx: problema de AEMET, no de la clave
+    if (i < attempts - 1) await sleep(gapMs);
+  }
+  if (other !== null) return { ok: null, detail: `HTTP ${other}` };
+  if (rejected === attempts) {
+    return { ok: false, detail: `AEMET rechaza la clave (401/403) en ${attempts} intentos seguidos: ha caducado o fue revocada` };
+  }
+  return { ok: null, detail: "sin respuesta fiable (red, timeout o 401 aislados)" };
+}
+
+/**
  * Aviso previo a la caducidad de la clave de AEMET. La clave NO cambia al
  * renovarla (el JWT no lleva fecha), así que el plazo hay que configurarlo a
  * mano con la fecha que dé AEMET: AEMET_KEY_DEADLINE=YYYY-MM-DD.

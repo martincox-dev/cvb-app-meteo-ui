@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   nextState, sanitizeTemplateParam, buildDigest, digestToTemplateParams,
-  aemetDeadlineCheck, createWatchdog,
+  aemetDeadlineCheck, createWatchdog, probeAemetKey,
 } from "../server/health-watchdog.mjs";
 
 const T0 = Date.UTC(2026, 9, 23, 8, 0, 0);
@@ -261,4 +261,106 @@ test("getSnapshot refleja el último estado", async () => {
   const snap = h.wd.getSnapshot();
   assert.equal(snap.checks.a.ok, false);
   assert.equal(snap.lastRun, T0);
+});
+
+// ── Clave de AEMET con 401 intermitentes ──────────────────────────────────
+// Tras la caducidad del 15/10/2026 AEMET devuelve 401 a ratos con la clave
+// válida. Una clave caducada de verdad falla SIEMPRE; esa es la diferencia.
+
+const seq = (...statuses) => {
+  let i = 0;
+  const calls = { n: 0 };
+  return { doRequest: async () => { calls.n += 1; return statuses[Math.min(i++, statuses.length - 1)]; }, calls };
+};
+const noWait = async () => {};
+
+test("clave: 401 en todos los intentos = fallo", async () => {
+  const s = seq(401, 401, 401, 401);
+  const r = await probeAemetKey({ doRequest: s.doRequest, sleep: noWait });
+  assert.equal(r.ok, false);
+  assert.equal(s.calls.n, 4);
+});
+
+test("clave: un 200 entre medias = bien, y deja de preguntar", async () => {
+  const s = seq(401, 401, 200);
+  const r = await probeAemetKey({ doRequest: s.doRequest, sleep: noWait });
+  assert.equal(r.ok, true);
+  assert.equal(s.calls.n, 3, "no gasta peticiones de más");
+  assert.match(r.detail, /intermitente/);
+});
+
+test("clave: 200 a la primera = OK sin comentarios", async () => {
+  const r = await probeAemetKey({ ...seq(200), sleep: noWait });
+  assert.equal(r.detail, "OK");
+});
+
+test("clave: 429 / 5xx / sin red = no se puede juzgar, no es fallo", async () => {
+  assert.equal((await probeAemetKey({ ...seq(503), sleep: noWait })).ok, null);
+  assert.equal((await probeAemetKey({ ...seq(429, 401, 401, 401), sleep: noWait })).ok, null);
+  assert.equal((await probeAemetKey({ ...seq(null), sleep: noWait })).ok, null);
+  // mezcla de timeouts y 401 aislados: tampoco basta para dar la clave por mala
+  assert.equal((await probeAemetKey({ ...seq(401, null, 401, null), sleep: noWait })).ok, null);
+});
+
+test("CRÍTICO: con la tasa de fallo REAL medida (20 % de 401), casi nunca avisa", async () => {
+  // 4 de 20 y 7 de 33 peticiones dieron 401 con la clave válida. Simulamos 3 meses
+  // de pasadas cada 15 min con un 20 % de 401 al azar (generador fijo, reproducible).
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+  const states = new Map();
+  const sent = [];
+  let clock = T0;
+  const wd = createWatchdog({
+    checks: [{
+      name: "aemet_api", label: "Clave de AEMET",
+      run: () => probeAemetKey({ doRequest: async () => (rnd() < 0.2 ? 401 : 200), sleep: noWait }),
+    }],
+    store: { load: async (n) => states.get(n) ?? null, save: async (n, s) => { states.set(n, s); } },
+    notify: async (d) => { sent.push(d); },
+    now: () => clock,
+    log: { error: () => {} },
+  });
+  const passes = 90 * 24 * 4;
+  for (let i = 0; i < passes; i++) { await wd.runOnce(); clock += 15 * MIN; }
+  assert.ok(sent.length <= 1, `${sent.length} avisos en 90 días con la clave VÁLIDA e intermitente`);
+});
+
+test("y la misma simulación SIN reintentos habría sido un chorro de avisos (por qué existe el reintento)", async () => {
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+  const states = new Map();
+  const sent = [];
+  let clock = T0;
+  const wd = createWatchdog({
+    checks: [{
+      name: "aemet_api", label: "Clave de AEMET",
+      run: async () => (rnd() < 0.2 ? { ok: false, detail: "401" } : { ok: true, detail: "OK" }),
+    }],
+    store: { load: async (n) => states.get(n) ?? null, save: async (n, s) => { states.set(n, s); } },
+    notify: async (d) => { sent.push(d); },
+    now: () => clock,
+    maxMessagesPerDay: 1000,
+    log: { error: () => {} },
+  });
+  for (let i = 0; i < 90 * 24 * 4; i++) { await wd.runOnce(); clock += 15 * MIN; }
+  assert.ok(sent.length > 100, `sin reintentos habrían sido ${sent.length} mensajes en 90 días`);
+});
+
+test("clave de verdad caducada (100 % de 401): el vigilante SÍ avisa, a las dos pasadas", async () => {
+  const states = new Map();
+  const sent = [];
+  let clock = T0;
+  const wd = createWatchdog({
+    checks: [{ name: "aemet_api", label: "Clave de AEMET", run: () => probeAemetKey({ doRequest: async () => 401, sleep: noWait }) }],
+    store: { load: async (n) => states.get(n) ?? null, save: async (n, s) => { states.set(n, s); } },
+    notify: async (d) => { sent.push(d); },
+    now: () => clock,
+    log: { error: () => {} },
+  });
+  await wd.runOnce();
+  assert.equal(sent.length, 0);
+  clock += 15 * MIN;
+  await wd.runOnce();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].detalle, /4 intentos seguidos/);
 });

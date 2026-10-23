@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { spawn } from "node:child_process";
 import { createClient } from "@libsql/client";
-import { createWatchdog, aemetDeadlineCheck, digestToTemplateParams } from "./health-watchdog.mjs";
+import { createWatchdog, aemetDeadlineCheck, digestToTemplateParams, probeAemetKey } from "./health-watchdog.mjs";
 
 const PORT = Number(process.env.PORT || 3001);
 const LAT = Number(process.env.LATITUDE || "40.04375215857617");
@@ -1842,10 +1842,10 @@ ${qrString
         fetchAemetAlertsFromRssCap(false)
           .then((a) => ({ name: "aemet_rss", ok: true, detail: `${a.length} alertas en feeds` }))
           .catch((e) => ({ name: "aemet_rss", ok: false, detail: e?.message })),
-        // AEMET API key
+        // AEMET API key (varios intentos: la API da 401 intermitentes con clave válida)
         AEMET_API_KEY
-          ? fetch(`https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77`, { headers: { api_key: AEMET_API_KEY }, signal: AbortSignal.timeout(8000) })
-              .then((r) => ({ name: "aemet_api", ok: r.status !== 401 && r.status !== 403, detail: `HTTP ${r.status}` }))
+          ? probeAemetKey({ doRequest: aemetKeyRequest, attempts: 3, gapMs: 1000 })
+              .then((r) => ({ name: "aemet_api", ok: r.ok !== false, detail: r.detail }))
               .catch((e) => ({ name: "aemet_api", ok: false, detail: e?.message }))
           : Promise.resolve({ name: "aemet_api", ok: false, detail: "AEMET_API_KEY no configurada" }),
         // Meta WhatsApp token
@@ -1975,6 +1975,15 @@ const healthStore = {
   },
 };
 
+// Una petición con la clave; devuelve el código HTTP o null si no hubo respuesta
+async function aemetKeyRequest() {
+  const r = await fetch("https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77", {
+    headers: { api_key: AEMET_API_KEY },
+    signal: AbortSignal.timeout(10000),
+  }).catch(() => null);
+  return r ? r.status : null;
+}
+
 // ok:true = bien · ok:false = fallo · ok:null = no se puede juzgar (no cuenta)
 function buildHealthChecks() {
   const checks = [];
@@ -1985,17 +1994,7 @@ function buildHealthChecks() {
     hint: "Renuévala en AEMET OpenData; la clave no cambia al renovarla.",
     run: async () => {
       if (!AEMET_API_KEY) return { ok: false, detail: "AEMET_API_KEY no configurada" };
-      const r = await fetch("https://opendata.aemet.es/opendata/api/avisos_cap/ultimoelaborado/area/77", {
-        headers: { api_key: AEMET_API_KEY },
-        signal: AbortSignal.timeout(10000),
-      }).catch(() => null);
-      if (!r) return { ok: null, detail: "sin respuesta (red o timeout)" };
-      if (r.status === 401 || r.status === 403) {
-        return { ok: false, detail: `AEMET rechaza la clave (HTTP ${r.status}): ha caducado o fue revocada` };
-      }
-      if (r.ok) return { ok: true, detail: "OK" };
-      // 429 / 5xx: el problema es de AEMET, no se puede juzgar la clave
-      return { ok: null, detail: `HTTP ${r.status}` };
+      return probeAemetKey({ doRequest: aemetKeyRequest, attempts: 4, gapMs: 1500 });
     },
   });
 
